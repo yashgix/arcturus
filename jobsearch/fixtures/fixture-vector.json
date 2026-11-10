@@ -1,0 +1,23 @@
+{
+  "apiVersion": "1",
+  "jobs": [
+    {
+      "isListed": true,
+      "title": "Software Engineer",
+      "location": "New York, NY",
+      "workplaceType": "OnSite",
+      "descriptionPlain": "Build TypeScript tooling and Python services.",
+      "employmentType": "FullTime",
+      "jobUrl": "https://jobs.ashbyhq.com/fixture-vector/opening-1"
+    },
+    {
+      "isListed": true,
+      "title": "Software Engineer",
+      "location": "United States",
+      "workplaceType": "Remote",
+      "descriptionPlain": "Build TypeScript services. We cannot sponsor visas.",
+      "employmentType": "FullTime",
+      "jobUrl": "https://jobs.ashbyhq.com/fixture-vector/opening-4"
+    }
+  ]
+}

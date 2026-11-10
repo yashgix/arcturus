@@ -1,0 +1,13 @@
+{
+  "apiVersion": "1",
+  "jobs": [{
+    "isListed": true,
+    "title": "Backend Engineer (synthetic demo)",
+    "descriptionPlain": "Fictional offline posting. Build Python APIs. Own backend services in NYC. Production on-call experience is preferred.",
+    "jobUrl": "https://jobs.ashbyhq.com/navigate-ai/offline-demo-engineer",
+    "location": "NYC",
+    "workplaceType": "Hybrid",
+    "employmentType": "FullTime",
+    "publishedAt": "2026-11-03T12:00:00Z"
+  }]
+}

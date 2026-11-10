@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "revision": "synthetic-demo-1",
+  "mode": "synthetic",
+  "sources": {
+    "demo-swe": {"document": "Synthetic SWE resume", "locator": "Example project A"},
+    "demo-ai": {"document": "Synthetic AI resume", "locator": "Example project B"}
+  },
+  "variants": {"swe": ["example-api"], "ai": ["example-evaluation"]},
+  "facts": {
+    "example-api": {
+      "claim": "Built a Python API for a fictional internal tool.",
+      "verified": true,
+      "technologies": ["Python"],
+      "metrics": ["Synthetic example: 20 test requests"],
+      "source_refs": ["demo-swe"]
+    },
+    "example-evaluation": {
+      "claim": "Designed a fictional evaluation harness for sample responses.",
+      "verified": true,
+      "technologies": ["Python", "pytest"],
+      "metrics": [],
+      "source_refs": ["demo-ai"]
+    }
+  },
+  "locations": {"allowed_terms": ["NYC", "New York", "United States"], "require_match": true}
+}

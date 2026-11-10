@@ -1,0 +1,39 @@
+#!/bin/sh
+# Installed root-owned; yashgx may run only this file as _arcexec, through sudo.
+#   run DIR NAME=VALUE... /usr/bin/sandbox-exec (-p|-f) PROFILE COMMAND...   start a job with only the given environment
+#   stop                                                                     kill every _arcexec process
+set -eu
+AREA=/Users/Shared/arcturus-exec
+[ "$(/usr/bin/id -un)" = _arcexec ] || { echo "run-as-exec: must run as _arcexec" >&2; exit 64; }
+case "${1:-}" in
+stop) exec /bin/kill -KILL -1 ;;
+run) ;;
+*) echo "run-as-exec: usage: run DIR ... | stop" >&2; exit 64 ;;
+esac
+dir=${2:?missing DIR}
+shift 2
+case "$dir" in
+"$AREA"/*) ;;
+*) echo "run-as-exec: DIR must be inside $AREA" >&2; exit 64 ;;
+esac
+case "$dir" in
+*/../* | */..) echo "run-as-exec: DIR must not contain .." >&2; exit 64 ;;
+esac
+# Only environment assignments may come before sandbox-exec, so nothing runs unsandboxed.
+sandboxed=
+prev=
+for arg; do
+  if [ "$prev" = /usr/bin/sandbox-exec ]; then
+    case "$arg" in -p | -f) sandboxed=1 ;; esac
+    break
+  fi
+  case "$arg" in
+  [A-Za-z_]*=*) ;;
+  /usr/bin/sandbox-exec) ;;
+  *) break ;;
+  esac
+  prev=$arg
+done
+[ -n "$sandboxed" ] || { echo "run-as-exec: command must be /usr/bin/sandbox-exec -p|-f PROFILE ..." >&2; exit 64; }
+cd "$dir"
+exec /usr/bin/env -i "$@"

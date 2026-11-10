@@ -1,0 +1,22 @@
+[project]
+name = "arcturus"
+version = "0.1.0"
+description = "A personal multi-agent system: job radar, company research, and sandboxed project builds under an approved budget"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.format]
+quote-style = "preserve"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+ignore = ["E731"]
+
+[tool.ruff.lint.per-file-ignores]
+# The first coordinator and its tests, kept because the pipeline still imports parts of it.
+"runner/arc.py" = ["E402", "E741", "F841"]
+"tests/{runner_gate,test_arc_unit,test_engineering_api}.py" = ["E402", "E741", "F402", "F841"]

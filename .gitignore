@@ -1,0 +1,9 @@
+paperclip-app/
+paperclip-home/
+tools/
+projects/
+tests/out/
+__pycache__/
+*.bak-*
+runner-state/
+policy/*.bak-*

@@ -1,0 +1,97 @@
+{
+ "projects": {
+  "alpha-habits": {
+   "dir": "~/arcturus-pilot/projects/alpha-habits",
+   "policy": "~/arcturus-pilot/policy/alpha-habits.json",
+   "builder": "Alpha Builder",
+   "test_cmd": [
+    "node",
+    "--test"
+   ],
+   "protected": [
+    "test/isolation.probe.test.js",
+    "test/acceptance"
+   ]
+  },
+  "beta-ratelimit": {
+   "dir": "~/arcturus-pilot/projects/beta-ratelimit",
+   "policy": "~/arcturus-pilot/policy/beta-ratelimit.json",
+   "builder": "Beta Builder",
+   "test_cmd": [
+    "node",
+    "--test"
+   ],
+   "protected": [
+    "test/isolation.probe.test.js",
+    "test/acceptance"
+   ]
+  },
+  "gamma-booking": {
+   "dir": "~/arcturus-pilot/projects/gamma-booking",
+   "policy": "~/arcturus-pilot/policy/gamma-booking.json",
+   "builder": "Gamma Builder",
+   "test_cmd": [
+    "node",
+    "--test"
+   ],
+   "protected": [
+    "test/isolation.probe.test.js",
+    "test/acceptance"
+   ]
+  },
+  "delta-feedback": {
+   "dir": "~/arcturus-pilot/projects/delta-feedback",
+   "policy": "~/arcturus-pilot/policy/delta-feedback.json",
+   "builder": "Delta Builder",
+   "test_cmd": [
+    "node",
+    "--test"
+   ],
+   "protected": [
+    "test/isolation.probe.test.js",
+    "test/acceptance"
+   ],
+   "serve": {
+    "entry": "src/serve.js",
+    "port": 4180,
+    "checks": "test/acceptance/http-checks.json"
+   }
+  },
+  "salus-bridge": {
+   "dir": "~/arcturus-pilot/projects/salus-bridge",
+   "policy": "~/arcturus-pilot/policy/salus-bridge.json",
+   "builder": "Salus Builder",
+   "test_cmd": [
+    "node",
+    "--test"
+   ],
+   "protected": [
+    "test/isolation.probe.test.js",
+    "test/acceptance",
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "types",
+    "docs/decide-contract.md"
+   ],
+   "readonly": [
+    "node_modules"
+   ]
+  }
+ },
+ "lead": {
+  "agent": "Lead",
+  "dir": "~/arcturus-pilot/projects/_lead",
+  "policy": "~/arcturus-pilot/policy/_lead.json",
+  "allowed_projects": [
+   "salus-bridge"
+  ]
+ },
+ "limits": {
+  "max_reviews": 3,
+  "max_repairs": 2,
+  "max_subtasks": 4,
+  "builder_max_turns": 40,
+  "lead_max_turns": 15
+ }
+}

@@ -1,0 +1,16 @@
+{
+  "boards": ["navigate-ai"],
+  "cadence": {
+    "name": "research-demo",
+    "timezone": "America/New_York",
+    "anchor": "2026-11-03",
+    "local_time": "00:00",
+    "interval_days": 1
+  },
+  "daily_requests": 5,
+  "daily_microusd": 5000,
+  "request_microusd": 1000,
+  "max_attempts": 3,
+  "poll_seconds": 15,
+  "tasks_per_tick": 5
+}

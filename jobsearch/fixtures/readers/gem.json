@@ -1,0 +1,78 @@
+[
+ {
+  "absolute_url": "https://jobs.gem.com/rootly/4015886007",
+  "content": "<h3><strong>About Rootly</strong></h3><div><br></div><div>At <a href=\"https://rootly.com/\" rel=\"noopener noreferrer\" target=\"_blank\">Rootly</a>, we are on a mission to be the go-to way companies respond when things go wrong, helping every organization be more reliable.  We do this by building an ind",
+  "content_plain": "About Rootly\nAt \nRootly\n, we are on a mission to be the go-to way companies respond when things go wrong, helping every organization be more reliable.  We do this by building an industry-leading incident management platform that allows companies around the world to consistently and quickly resolve i",
+  "created_at": "2023-04-17T14:10:42.000Z",
+  "departments": [
+   {
+    "child_ids": [],
+    "id": "4005912007",
+    "name": "Engineering",
+    "parent_id": null
+   }
+  ],
+  "employment_type": "full_time",
+  "first_published_at": "2023-04-17T14:11:41.000Z",
+  "id": "4015886007",
+  "internal_job_id": "4015334007",
+  "location": {
+   "name": "Toronto, Canada"
+  },
+  "location_type": "hybrid",
+  "offices": [
+   {
+    "child_ids": [],
+    "child_office_external_ids": [],
+    "id": "4005805007",
+    "location": {
+     "name": "Toronto, Canada"
+    },
+    "name": "Office",
+    "parent_id": null,
+    "parent_office_external_id": null
+   }
+  ],
+  "requisition_id": "5",
+  "title": "Senior Product Engineer",
+  "updated_at": "2026-10-27T22:36:36.802Z"
+ },
+ {
+  "absolute_url": "https://jobs.gem.com/rootly/am9icG9zdDo6WGY8F_J0F1hLFOVgkEKU",
+  "content": "<h3><strong>About Rootly</strong></h3><div><br></div><div>At <a href=\"https://rootly.com/\" rel=\"noopener noreferrer\" target=\"_blank\">Rootly</a>, we are on a mission to be the go-to way companies respond when things go wrong, helping every organization be more reliable.  We do this by building an ind",
+  "content_plain": "About Rootly\nAt \nRootly\n, we are on a mission to be the go-to way companies respond when things go wrong, helping every organization be more reliable.  We do this by building an industry-leading incident management platform that allows companies around the world to consistently and quickly resolve i",
+  "created_at": "2026-05-21T03:00:13.186Z",
+  "departments": [
+   {
+    "child_ids": [],
+    "id": "4062026007",
+    "name": "GTM",
+    "parent_id": null
+   }
+  ],
+  "employment_type": "full_time",
+  "first_published_at": "2026-05-21T03:13:27.976Z",
+  "id": "am9icG9zdDo6WGY8F_J0F1hLFOVgkEKU",
+  "internal_job_id": "am9iOh_8FVNeA8J4L_69Jt52l1k",
+  "location": {
+   "name": "Korea, Republic of - Remote"
+  },
+  "location_type": "remote",
+  "offices": [
+   {
+    "child_ids": [],
+    "child_office_external_ids": [],
+    "id": "bG9jOqDt6IaTQuhyCs2QLYHDWEo",
+    "location": {
+     "name": "Korea, Republic of - Remote"
+    },
+    "name": "South Korea - Remote",
+    "parent_id": null,
+    "parent_office_external_id": null
+   }
+  ],
+  "requisition_id": "R12",
+  "title": "Technical Support Engineer - APAC",
+  "updated_at": "2026-10-29T17:01:57.747Z"
+ }
+]

@@ -1,0 +1,102 @@
+{
+  "max_active": 8,
+  "max_builds": 6,
+  "build_ramp_seconds": 60,
+  "build_window": null,
+  "repairs": 0,
+  "recovery": {
+    "attempts": 4,
+    "medium_repairs": 1,
+    "respecs": 1,
+    "company_usd": 5.0,
+    "round_usd": 1.5
+  },
+  "reserve": {
+    "max": {
+      "five_hour": 80,
+      "seven_day": 75
+    },
+    "codex": {
+      "five_hour": 80,
+      "seven_day": 95
+    }
+  },
+  "machine": {
+    "min_free_memory_percent": 20,
+    "max_load_per_core": 1.0
+  },
+  "steps": {
+    "extract": [
+      "deepseek-flash",
+      "claude-haiku-5-5",
+      "gpt-6-luna"
+    ],
+    "dossier": [
+      "deepseek-flash",
+      "claude-haiku-5-5",
+      "gpt-6-luna"
+    ],
+    "projects": [
+      "claude-sonnet-5-5",
+      "gpt-6-sol"
+    ],
+    "challenge": [
+      "claude-haiku-5-5",
+      "gpt-6-luna"
+    ],
+    "decide": [
+      "max:opus",
+      "claude-sonnet-5-5",
+      "gpt-6-sol"
+    ],
+    "data": [
+      "deepseek-flash",
+      "claude-haiku-5-5",
+      "gpt-6-luna"
+    ],
+    "spec": [
+      "max:opus",
+      "claude-sonnet-5-5",
+      "gpt-6-sol"
+    ],
+    "plan": [
+      "deepseek-flash",
+      "claude-sonnet-5-5",
+      "gpt-6-sol"
+    ],
+    "build": [
+      "deepseek-flash",
+      "deepseek-v4-pro",
+      "gpt-6-sol",
+      "claude-sonnet-5-5"
+    ],
+    "review": [
+      "claude-haiku-5-5",
+      "gpt-6-luna"
+    ],
+    "final_review": [
+      "codex",
+      "gpt-6-sol",
+      "claude-sonnet-5-5"
+    ],
+    "outreach": [
+      "max:sonnet",
+      "claude-sonnet-5-5",
+      "gpt-6-sol"
+    ],
+    "notes": [
+      "max:sonnet",
+      "deepseek-flash",
+      "claude-haiku-5-5"
+    ],
+    "escalate": [
+      "deepseek-v4-pro",
+      "claude-sonnet-5-5",
+      "gpt-6-sol"
+    ],
+    "packet": [
+      "max:sonnet",
+      "max:opus"
+    ]
+  }
+}

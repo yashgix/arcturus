@@ -1,0 +1,11 @@
+{"type": "object", "additionalProperties": false, "required": ["summary", "subtasks"],
+ "properties": {"summary": {"type": "string"},
+  "subtasks": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"type": "object", "additionalProperties": false,
+    "required": ["id", "project", "role", "title", "description", "acceptance", "depends_on", "owned_paths", "acceptance_tests"],
+    "properties": {"id": {"type": "string"}, "project": {"type": "string", "enum": ["alpha-habits", "beta-ratelimit"]},
+                   "role": {"type": "string", "enum": ["backend", "frontend", "integration", "testing", "docs", "other"]},
+                   "title": {"type": "string"}, "description": {"type": "string"},
+                   "acceptance": {"type": "array", "items": {"type": "string"}},
+                   "depends_on": {"type": "array", "items": {"type": "string"}},
+                   "owned_paths": {"type": "array", "items": {"type": "string"}},
+                   "acceptance_tests": {"type": "array", "items": {"type": "string"}}}}}}}

@@ -1,0 +1,32 @@
+{
+ "uuid": "732252f5-1186-4010-b186-ac0aa39c4243",
+ "name": "Electrical Engineer",
+ "description": {
+  "company": "<div><body><p style='font-family:\"Basel Grotesk\",Arial,sans-serif;font-size:11pt;font-weight:400;line-height:1.6;letter-spacing:0.25px;margin:4px 0px;padding:0px;'><b><strong style=\"font-size:18pt;white-space:pre-wrap;\">About Inflection Space Systems</strong></b></p><p style='font-family:\"Basel Grot",
+  "role": "<div><body><p style='font-family:\"Basel Grotesk\",Arial,sans-serif;font-size:11pt;font-weight:400;line-height:1.6;letter-spacing:0.25px;margin:4px 0px;padding:0px;'><b><strong style=\"font-size:18pt;white-space:pre-wrap;\">About the role</strong></b></p><p style='font-family:\"Basel Grotesk\",Arial,sans-"
+ },
+ "workLocations": [
+  "Los Angeles, CA"
+ ],
+ "department": {
+  "name": "Engineering",
+  "base_department": "Engineering",
+  "department_tree": [
+   "Engineering"
+  ]
+ },
+ "employmentType": {
+  "label": "SALARIED_FT",
+  "id": "Salaried, full-time"
+ },
+ "createdOn": "2026-09-19T17:30:26.642000-07:00",
+ "eeocQuestionnaireEnabled": true,
+ "eeocQuestionnaireEnabledForJobPost": true,
+ "url": "https://ats.rippling.com/inflection-space/jobs/732252f5-1186-4010-b186-ac0aa39c4243",
+ "payRangeDetails": [],
+ "applicationConfirmationTemplate": "697be97fd68bb42edcfe9c8c",
+ "hasAIEvaluationsEnabled": false,
+ "companyName": "Inflection Space Systems Corporation",
+ "unlistedFromSearch": false,
+ "jsonLd": null
+}

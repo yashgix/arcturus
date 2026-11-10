@@ -1,0 +1,28 @@
+{
+ "items": [
+  {
+   "id": "732252f5-1186-4010-b186-ac0aa39c4243",
+   "name": "Electrical Engineer",
+   "url": "https://ats.rippling.com/inflection-space/jobs/732252f5-1186-4010-b186-ac0aa39c4243",
+   "department": {
+    "name": "Engineering"
+   },
+   "locations": [
+    {
+     "name": "Los Angeles, CA",
+     "country": "United States",
+     "countryCode": "US",
+     "state": "California",
+     "stateCode": "CA",
+     "city": "Los Angeles",
+     "workplaceType": "REMOTE"
+    }
+   ],
+   "language": "en-US"
+  }
+ ],
+ "page": 0,
+ "pageSize": 100,
+ "totalItems": 1,
+ "totalPages": 1
+}

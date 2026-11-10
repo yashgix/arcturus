@@ -1,0 +1,11 @@
+{
+  "roles": ["software engineer", "swe", "backend engineer", "backend software engineer", "full stack engineer", "full-stack engineer", "fullstack engineer", "applied ai", "ai engineer", "machine learning engineer", "forward deployed engineer", "forward-deployed engineer", "forward deployed software engineer", "forward-deployed software engineer", "fde", "founding engineer", "founding software engineer", "mobile engineer"],
+  "skills": ["python", "typescript", "javascript", "postgresql", "distributed systems", "machine learning", "llm", "aws"],
+  "excluded_titles": [],
+  "locations": ["new york", "nyc", "san francisco", "united states", "usa", "us remote"],
+  "prefer_remote": true,
+  "require_location": false,
+  "exclude_visa_denials": false,
+  "freshness_days": 14,
+  "shortlist_size": 25
+}

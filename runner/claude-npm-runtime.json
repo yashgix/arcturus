@@ -1,0 +1,51 @@
+{
+  "version": "2.1.63",
+  "platform": "Darwin",
+  "machine": "arm64",
+  "entry": "cli.js",
+  "files": {
+    "LICENSE.md": "8ce94b9478bb9868f9641f818e06cd722fbe55d4c22e2d2ed11971b20146173a",
+    "README.md": "9c121f2b01db7f62e3b75e400c8846857b4c32976083ae5a7b2cf6939876c17e",
+    "bun.lock": "969e57d2d8dea5eb2fd7f8e63b6eecbc195f9b5577a91e8ab9a7cc19e4eaccdd",
+    "cli.js": "12809142119cce671afbd9d422b524778de786752aeef2ba1f70879b5d4dce0d",
+    "node_modules/@img/sharp-darwin-arm64/LICENSE": "73ba74dfaa520b49a401b5d21459a8523a146f3b7518a833eea5efa85130bf68",
+    "node_modules/@img/sharp-darwin-arm64/README.md": "ef448bf7ac130f0c6b51dbfbadc617b046a200d082de8648ab090784c5db0c3d",
+    "node_modules/@img/sharp-darwin-arm64/lib/sharp-darwin-arm64.node": "05dba5ee40609b0ac94e14e591c515b3d9bd813ff5939625ff9a4bb78eb7c628",
+    "node_modules/@img/sharp-darwin-arm64/package.json": "58155bcbf12d3937751d3003794b6a54a64c973949be71ae036c9e2cfd993392",
+    "node_modules/@img/sharp-libvips-darwin-arm64/README.md": "47c37432ea30fcf5767611bca7c054d141f7584479ce8b58b5de6b88f9008d1d",
+    "node_modules/@img/sharp-libvips-darwin-arm64/lib/glib-2.0/include/glibconfig.h": "6e6b30ab9b5f9142a926126e31807f5c0e8ed2f435a86587831f92cd30fe028c",
+    "node_modules/@img/sharp-libvips-darwin-arm64/lib/index.js": "516a08c06660cddb50d5f30ccac29a0514b05724956a11e8a7e6b799f2e1ab72",
+    "node_modules/@img/sharp-libvips-darwin-arm64/lib/libvips-cpp.8.17.3.dylib": "ad39fe2d407fca7532326eb819af010725a1df9187ef26a6d4aba629b71f173d",
+    "node_modules/@img/sharp-libvips-darwin-arm64/package.json": "36961cede2dd16bfac3ba20dbd340162e5f06ff0a4c766fb640a3aad2241940b",
+    "node_modules/@img/sharp-libvips-darwin-arm64/versions.json": "e823074bfa33ed7b1861b797dd3c60d7ef8c34cd2faa9a7d22ec32dd6d6ad8ad",
+    "package.json": "28dcedd81c364e191793be88a2910ac77772da42447c2d7a1916dd7eab1fe217",
+    "resvg.wasm": "22bf6e9f9a100d972da0411a69c5ba504367fc1fa87b3b64e3f35e53926d2d70",
+    "sdk-tools.d.ts": "93c9d95fb48fdca36299f6ae34ca0922dc840246875849a22b35b2e4af2b433c",
+    "tree-sitter-bash.wasm": "364f0a2cd385c792239423026ef442dbd073d34c396b7bc9e5932426b8e4aa5d",
+    "tree-sitter.wasm": "0ce0c1e5ecd6ca51cf0ee32bd06012c14133332f1e28423f322cdabf9e061637",
+    "vendor/ripgrep/COPYING": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f",
+    "vendor/ripgrep/arm64-darwin/rg": "f052af072a844ef3a2189a269da0c061fc90750ce85af7e91e8c8fcc88047a40",
+    "vendor/ripgrep/arm64-darwin/ripgrep.node": "920cdefc6184643ddabdd3d34c5544e6bb3a3a65fa8b7361ab1cb168648747d1",
+    "vendor/ripgrep/arm64-linux/rg": "717b20bd9176b6b81ecc9930d342cac9dfa3a129f194ea3923ac5a7fedad7ddf",
+    "vendor/ripgrep/arm64-linux/ripgrep.node": "45b787d7b3ca36c4cf9c0c3a7d92f5b182085f6bd88b942496fe772ff6e8e73b",
+    "vendor/ripgrep/arm64-win32/rg.exe": "bb0b1cf86e6cb3407d1f1aee9761d587842508513a6828420d40a40b966a05ec",
+    "vendor/ripgrep/arm64-win32/ripgrep.node": "9fe83c71abc8aeaadf0358c9699e93ba71b04f93912c37c253e511aefdf2c2b3",
+    "vendor/ripgrep/x64-darwin/rg": "923dcc25cab57d33f4e7dd0476d4b74a554401a38817e246a8d6101dcd51c50f",
+    "vendor/ripgrep/x64-darwin/ripgrep.node": "c0b043a1507e140487ec699ba4a8f9158df6cf83207116eaf1b2735bb19bb0f9",
+    "vendor/ripgrep/x64-linux/rg": "f401154e2393f9002ac77e419f9ee5521c18f4f8cd3e32293972f493ba06fce7",
+    "vendor/ripgrep/x64-linux/ripgrep.node": "64c2d622043f9c75e8121a2f62f2eb8e2b5289d4b24bf7b3d873f000b159127f",
+    "vendor/ripgrep/x64-win32/rg.exe": "f162b54de2adfc72d78adb1dbada2dedda111ae0a5e2f6e9500f4f909664c5d2",
+    "vendor/ripgrep/x64-win32/ripgrep.node": "5315175fc2b13d8c1b77c8bf6bf6c724f6c58be9e93c4cd2fac77320b8d9038e"
+  },
+  "required_executables": [
+    "vendor/ripgrep/arm64-darwin/rg"
+  ],
+  "ripgrep_pcre2": {
+    "executable": "vendor/ripgrep/arm64-darwin/rg",
+    "library": "/opt/homebrew/opt/pcre2/lib/libpcre2-8.0.dylib",
+    "library_sha256": "6b698ffc744550e149829d94045912448b8ac4b692cb267dce9fc2f3ed60659d",
+    "bundle_library": "libarcturus-pcre2-8.0.dylib",
+    "signed_executable_sha256": "5332c51ed3786a8988d0753765e55ad8c2932b023ceef2b93adfaa63e2ff21d6",
+    "install_name_tool": "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool"
+  }
+}

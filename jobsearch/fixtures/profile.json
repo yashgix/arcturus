@@ -1,0 +1,11 @@
+{
+  "roles": ["software engineer", "backend engineer", "platform engineer", "full stack engineer", "machine learning engineer"],
+  "skills": ["python", "typescript", "postgresql", "distributed systems", "machine learning", "aws"],
+  "excluded_titles": ["senior", "staff", "principal", "director", "manager", "lead"],
+  "locations": ["new york", "nyc", "united states", "usa", "us remote"],
+  "prefer_remote": true,
+  "require_location": true,
+  "exclude_visa_denials": true,
+  "freshness_days": 14,
+  "shortlist_size": 10
+}

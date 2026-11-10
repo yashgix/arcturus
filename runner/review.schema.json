@@ -1,0 +1,8 @@
+{"type": "object", "additionalProperties": false, "required": ["verdict", "summary", "findings", "tests_run", "coverage"],
+ "properties": {"verdict": {"type": "string", "enum": ["approve", "changes_requested"]}, "summary": {"type": "string"},
+  "tests_run": {"type": "string"},
+  "findings": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["severity", "file", "issue"],
+    "properties": {"severity": {"type": "string", "enum": ["high", "medium", "low"]}, "file": {"type": "string"}, "issue": {"type": "string"}}}},
+  "coverage": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["criterion", "status", "evidence"],
+    "properties": {"criterion": {"type": "string"}, "status": {"type": "string", "enum": ["met", "not_met", "unverified"]},
+                   "evidence": {"type": "string"}}}}}}

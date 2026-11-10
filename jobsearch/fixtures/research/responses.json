@@ -1,0 +1,11 @@
+{
+  "offline-demo-engineer": {
+    "company": {"text": "Company research is limited to the synthetic posting supplied for this test.", "source_ids": ["posting"]},
+    "role": {"text": "The synthetic role calls for Python APIs and backend ownership in NYC.", "source_ids": ["posting"]},
+    "technical_fit": {"score": 70, "text": "The fictional API project covers one stated requirement.", "source_ids": ["posting"], "fact_ids": ["example-api"]},
+    "seniority_fit": {"score": 40, "text": "The example project supports implementation experience. On-call ownership needs verification.", "source_ids": ["posting"], "fact_ids": ["example-api"]},
+    "gaps": [{"text": "Verify production on-call experience.", "source_ids": ["posting"], "fact_ids": []}],
+    "tailoring": [{"text": "Lead with the fictional Python API project in the SWE variant.", "source_ids": ["posting"], "fact_ids": ["example-api"]}],
+    "draft_answers": [{"question": "Describe a relevant project.", "text": "Synthetic example: I built a Python API for a fictional internal tool.", "source_ids": ["posting"], "fact_ids": ["example-api"]}]
+  }
+}

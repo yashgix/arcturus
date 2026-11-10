@@ -1,0 +1,32 @@
+{
+  "apiVersion": "1",
+  "jobs": [
+    {
+      "isListed": true,
+      "title": "Backend Engineer",
+      "location": "New York, NY",
+      "workplaceType": "Hybrid",
+      "descriptionPlain": "Build Python services backed by PostgreSQL. Visa sponsorship is available.",
+      "employmentType": "FullTime",
+      "jobUrl": "https://jobs.ashbyhq.com/fixture-orbit/opening-1"
+    },
+    {
+      "isListed": true,
+      "title": "Platform Engineer",
+      "location": "United States",
+      "workplaceType": "Remote",
+      "descriptionPlain": "Operate distributed systems on AWS with Python.",
+      "employmentType": "FullTime",
+      "jobUrl": "https://jobs.ashbyhq.com/fixture-orbit/opening-2"
+    },
+    {
+      "isListed": true,
+      "title": "Staff Software Engineer",
+      "location": "New York, NY",
+      "workplaceType": "Hybrid",
+      "descriptionPlain": "Lead the distributed systems group.",
+      "employmentType": "FullTime",
+      "jobUrl": "https://jobs.ashbyhq.com/fixture-orbit/opening-3"
+    }
+  ]
+}

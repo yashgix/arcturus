@@ -1,0 +1,94 @@
+{
+ "data": [
+  {
+   "id": "496135",
+   "benefits_header": "WHAT WE OFFER",
+   "compensation": null,
+   "compensation_minimum": null,
+   "compensation_maximum": null,
+   "compensation_currency": null,
+   "compensation_frequency": null,
+   "compensation_visible": false,
+   "deadline_at": null,
+   "description": "<h1><!--block-->Build the future of<br>sports markets.</h1><div><!--block-->ProphetX is building America's next great asset class: prediction markets powered by sports event contracts. We're a small, focused team doing serious infrastructure work at the intersection of sports, trading, and technolog",
+   "employment_type": "full_time",
+   "employment_type_text": "Full Time",
+   "key_responsibilities": "<div><!--block-->We hire across a range of disciplines. Even when we're not actively hiring, we stay interested in meeting people with the right mix of skill and drive.<br><br></div><ul><li><!--block-->Engineering</li><li><!--block-->Product &amp; Analytics</li><li><!--block-->Markets &amp; Operatio",
+   "key_responsibilities_header": "WHERE YOU MIGHT FIT",
+   "reporting_to": "",
+   "skills_knowledge_expertise": "<h2><!--block-->Built to move fast,<br>built to last</h2><div><!--block-->We operate with focus and intention, not excess. Sports markets don't sleep, and neither do the problems we solve. From real-time data and pricing to market integrity and user experience, the work here is <strong>challenging, ",
+   "skills_knowledge_expertise_header": "HOW WE WORK",
+   "title": "JOIN THE PROPHETX TALENT NETWORK",
+   "url": "https://prophetexchange.pinpointhq.com/en/postings/5d226f78-0f1e-4134-b9db-8df5e6b59bf2",
+   "path": "/en/postings/5d226f78-0f1e-4134-b9db-8df5e6b59bf2",
+   "workplace_type": "remote",
+   "workplace_type_text": "Fully remote",
+   "job": {
+    "id": "503652",
+    "requisition_id": "",
+    "department": {
+     "id": "74870",
+     "name": "Executive"
+    },
+    "division": {
+     "id": "16288",
+     "name": "U.S. Based"
+    },
+    "structure_custom_group_one": null
+   },
+   "location": {
+    "id": "83344",
+    "city": "New York",
+    "name": "Remote - USA",
+    "postal_code": "10007",
+    "province": "New York",
+    "street_address": "4 World Trade Center"
+   }
+  },
+  {
+   "id": "605158",
+   "benefits_header": "Why Join Us!",
+   "compensation": "$130,000 - $180,000 / year",
+   "compensation_minimum": 130000.0,
+   "compensation_maximum": 180000.0,
+   "compensation_currency": "USD",
+   "compensation_frequency": "year",
+   "compensation_visible": true,
+   "deadline_at": "2026-11-27T23:59:59-05:00",
+   "description": "<h2><!--block--><strong>Role Overview</strong></h2><div><!--block-->We're looking for a Senior Backend Engineer (IC3) to take ownership of designing, developing, deploying, and maintaining complex backend systems. You will lead delivery on large projects within the team, translate product requiremen",
+   "employment_type": "full_time",
+   "employment_type_text": "Full Time",
+   "key_responsibilities": "<h3><!--block--><strong>What You’ll Do</strong></h3><ul><li><!--block-->Lead the design and implementation of multiple large projects within one team, with production-level ownership.</li><li><!--block-->Translate product requirements into detailed engineering tasks and be the translation layer betw",
+   "key_responsibilities_header": "Key Responsibilities",
+   "reporting_to": "",
+   "skills_knowledge_expertise": "<h3><!--block--><strong>What We’re Looking For</strong></h3><ul><li><!--block-->3+ years of hands-on backend experience in Go, Java, C++, or Python, with deep Go ecosystem knowledge preferred</li><li><!--block-->2+ years building on AWS or equivalent cloud platforms (GCP, Azure)</li><li><!--block-->",
+   "skills_knowledge_expertise_header": "Skills, Knowledge and Expertise",
+   "title": "Senior Backend Engineer",
+   "url": "https://prophetexchange.pinpointhq.com/en/postings/6f920262-6974-49c7-b6ee-f584edeafe82",
+   "path": "/en/postings/6f920262-6974-49c7-b6ee-f584edeafe82",
+   "workplace_type": "onsite",
+   "workplace_type_text": "Onsite",
+   "job": {
+    "id": "604464",
+    "requisition_id": "ENG-003",
+    "department": {
+     "id": "74284",
+     "name": "Engineering"
+    },
+    "division": {
+     "id": "16288",
+     "name": "U.S. Based"
+    },
+    "structure_custom_group_one": null
+   },
+   "location": {
+    "id": "83344",
+    "city": "New York",
+    "name": "Remote - USA",
+    "postal_code": "10007",
+    "province": "New York",
+    "street_address": "4 World Trade Center"
+   }
+  }
+ ]
+}
