@@ -95,6 +95,9 @@ DEFAULT_MODELS = {
 }
 GITIGNORE = "__pycache__/\n*.pyc\n"
 MAX_REVIEW_BYTES = 400_000
+# An experiment's recorded model answers: committed so anyone can recompute its metrics, never shown to a later
+# builder or reviewer (untrusted text, and it would use up the review budget).
+RECORDING = "results/llm-calls.jsonl"
 KINDS = ("ok", "fail", "error")
 # The runner itself must hold nothing worth reading: code under test can read its environment.
 CLEAN_ENV = {"PATH", "HOME", "LANG", "LC_CTYPE", "TMPDIR", "PWD", "SHLVL", "_", "__CF_USER_TEXT_ENCODING"}
@@ -302,7 +305,11 @@ class Build(Workflow):
             if mode not in ("100644", "100755"):
                 result[path] = "(not a regular file; not read)"
                 continue
-            total += int(git(arm, workspace, "cat-file", "-s", oid))
+            size = int(git(arm, workspace, "cat-file", "-s", oid))
+            if path == RECORDING:
+                result[path] = f"(experiment model recording, {size} bytes, git blob {oid}; not read)"
+                continue
+            total += size
             result[path] = (
                 git(arm, workspace, "cat-file", "blob", oid) if total <= MAX_REVIEW_BYTES else "(omitted: size limit)"
             )

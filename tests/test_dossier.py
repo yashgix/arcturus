@@ -30,6 +30,7 @@ class Provider:
         self.packets = []
         self.cutoffs = {}  # (provider, step) -> how many more answers are cut off
         self.cut_models = set()  # (model, step): every answer is cut off
+        self.thinking = set()  # (model, step): every answer spends its whole limit on reasoning, no text
 
     def __call__(self, host, port, timeout, context):
         return Connection(self, host)
@@ -76,6 +77,20 @@ class Provider:
                     "input_tokens_details": {"cached_tokens": 0},
                     "output_tokens": 500,
                     "output_tokens_details": {"reasoning_tokens": 100},
+                },
+            }
+        if (wire["model"], step) in self.thinking:
+            limit = wire["max_tokens"]
+            return {
+                "id": "ds-1",
+                "model": model,
+                "system_fingerprint": "fixture",
+                "choices": [{"index": 0, "finish_reason": "length", "message": {"role": "assistant", "content": ""}}],
+                "usage": {
+                    "prompt_tokens": 1000,
+                    "prompt_cache_hit_tokens": 0,
+                    "completion_tokens": limit,
+                    "completion_tokens_details": {"reasoning_tokens": limit},
                 },
             }
         return {

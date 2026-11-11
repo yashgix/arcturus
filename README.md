@@ -16,10 +16,11 @@ work and recovers from failures. **Arcturus should adapt to the task, not the ta
 
 ## What it does today
 
-- **Build.** Turns a written spec into working, tested software. Models write the code, the code runs in a sandbox
-  against hidden acceptance tests the builder never sees, an independent model reviews it, and failures get
-  targeted repairs. Projects run in vetted, hash-pinned environments: web APIs (FastAPI), browser tests (Playwright),
-  scientific Python and reproducible experiments.
+- **Build.** Turns a written spec into working, tested software. Before the build, a model checks the spec and its
+  hidden tests for contradictions; models write the code, the code runs in a sandbox against hidden acceptance tests the builder never
+  sees, an independent model reviews it, and failures get targeted repairs. Projects run in vetted, hash-pinned
+  environments: web APIs (FastAPI), browser tests (Playwright), scientific Python and reproducible experiments.
+  Experiments can call real models through a capped broker that records the first run and replays it at no cost.
 - **Research.** Produces source-backed research: captures the sources, checks every quote against them, cites each
   finding, and has a second model challenge the conclusions.
 - **Evaluate.** Benchmarks AI agents in a sandbox. Every model call goes through a broker, and a verifier replays the

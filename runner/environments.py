@@ -1,7 +1,8 @@
 """Vetted Python environments for builds. Each recipe in envs/ (packages, lock with hashes, description) is made
 into a read-only environment in the execution area by the runner, from PyPI wheels only: nothing is built from
 source, so no package install script runs; the only code run at install is a recipe's named setup step (e.g.
-Playwright's browser download). An environment made by hand from a project's own lock has only its .json
+Playwright's browser download). A recipe with "npm" also gets a read-only node_modules from its exact
+package-lock.json, installed with npm ci and no install scripts. An environment made by hand from a project's own lock has only its .json
 here. Builders never install anything. A new recipe or package needs Yash's OK.
 
     python3 runner/environments.py lock NAME   # resolve NAME.in to NAME.lock
@@ -14,11 +15,13 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 
 PYTHON = "/opt/homebrew/bin/python3"
 ROOT = Path("/Users/Shared/arcturus-exec/envs")
 RECIPES = Path(__file__).with_name("envs")
 UV = "/opt/homebrew/bin/uv"
+NODE = Path("/opt/homebrew/opt/node@22/bin")
 STDLIB = {"python": PYTHON, "read": [], "env": {}, "about": "Python 3.14 standard library only"}
 
 
@@ -36,10 +39,32 @@ def available():
             envs[path.stem] = {
                 "python": str(folder / "bin" / "python"),
                 "read": [str(folder), *spec.get("read", [])],
-                "env": spec.get("env", {}),
+                "env": {**spec.get("env", {}), **node_env(folder, spec)},
                 "about": spec["about"],
             }
     return envs
+
+
+def node_env(folder, spec):
+    """Where a test finds Node and the environment's packages (it runs them through subprocess)."""
+    if not spec.get("npm"):
+        return {}
+    return {"ARCTURUS_NODE": str(NODE / "node"), "ARCTURUS_NODE_MODULES": str(folder / "node" / "node_modules")}
+
+
+def npm_install(name, target):
+    """The exact lock only (npm ci), with no package's install scripts run."""
+    node = target / "node"
+    node.mkdir()
+    shutil.copy(RECIPES / f"{name}.package.json", node / "package.json")
+    shutil.copy(RECIPES / f"{name}.package-lock.json", node / "package-lock.json")
+    with tempfile.TemporaryDirectory() as home:  # npm's cache stays out of the environment
+        subprocess.run(
+            [str(NODE / "npm"), "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+            cwd=node,
+            env={"PATH": f"{NODE}:/usr/bin:/bin", "HOME": home},
+            check=True,
+        )
 
 
 def lock(name):
@@ -87,6 +112,8 @@ def make(name):
             ],
             check=True,
         )
+        if spec.get("npm"):
+            npm_install(name, target)
         for args in spec.get("setup", []):
             subprocess.run(
                 [str(target / "bin" / "python"), *args], env={**os.environ, **spec.get("env", {})}, check=True

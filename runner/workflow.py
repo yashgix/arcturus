@@ -16,6 +16,14 @@ CONCISE = "Your last answer was cut off at the output limit. Keep every field sh
 PROVIDER_SLOTS = 3
 
 
+THINKING_ONLY = "cut off with the whole output limit spent on reasoning"
+
+
+def thinking_only(usage, limit):
+    """A cut-off at the full limit with no answer text: asking again, even "concisely", fails the same way."""
+    return bool(usage) and usage["output"] >= limit and usage.get("reasoning", 0) >= usage["output"]
+
+
 class Stopped(Exception):
     pass
 
@@ -99,9 +107,13 @@ class Workflow:
         grants.verified(self.root)
 
     def cutoffs(self, company, provider, name, model):
-        """This model's cut-off answers to this step: another model taking over starts fresh."""
+        """The usage of this model's cut-off answers to this step: another model taking over starts fresh."""
         key = (f"{company['id']}/{provider}", name, model, "truncated")
-        return sum(1 for r in self.ledger.rows() if (r["lane"], r["step"], r["model"], r["state"]) == key)
+        return [
+            json.loads(r["usage"] or "{}")
+            for r in self.ledger.rows()
+            if (r["lane"], r["step"], r["model"], r["state"]) == key
+        ]
 
     def step(self, company, provider, name, model, packet, schema, check):
         """One checkpointed step: bounded attempts with feedback; Truncated is left to the caller to split."""
@@ -116,11 +128,15 @@ class Workflow:
         }
         feedback, log = None, []
         # The cut-off rule survives a restart: the ledger remembers answers that were cut off.
-        cutoffs = self.cutoffs(company, provider, name, model)
+        earlier = self.cutoffs(company, provider, name, model)
+        cutoffs = len(earlier)
         if cutoffs > 1:
             if name.startswith(self.splittable):
                 raise Truncated(name)
             (lane / f"{name}.failed.json").write_text(json.dumps({"log": [], "last_problems": ["cut off twice"]}))
+            return None
+        if not name.startswith(self.splittable) and any(thinking_only(u, granted) for u in earlier):
+            (lane / f"{name}.failed.json").write_text(json.dumps({"log": [], "last_problems": [THINKING_ONLY]}))
             return None
         if cutoffs:
             settings["max_output_tokens"], feedback = granted, [self.concise]
@@ -171,6 +187,9 @@ class Workflow:
                     (lane / f"{name}.log.json").write_text(json.dumps(log, indent=1))
                     raise Truncated(name)
                 if cutoffs > 1:
+                    break
+                if full and thinking_only(outcome.usage, granted):
+                    feedback = [THINKING_ONLY]
                     break
                 if full:
                     feedback = [self.concise]

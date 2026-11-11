@@ -416,10 +416,15 @@ def place(base, arm):
     if (Path(base) / FOLDER).is_dir():
         shutil.copytree(Path(base) / FOLDER, target, symlinks=True)
         readable(target)
-    exclude = Path(arm) / "git" / "info" / "exclude"
-    if f"/{FOLDER}" not in (exclude.read_text().split() if exclude.exists() else []):
-        with open(exclude, "a") as file:
-            file.write(f"/{FOLDER}\n")
+    exclude(arm, f"/{FOLDER}")
+
+
+def exclude(arm, pattern):
+    """Keep a runner-placed path out of the arm's git, so no commit or packet holds it."""
+    rules = Path(arm) / "git" / "info" / "exclude"
+    if pattern not in (rules.read_text().split() if rules.exists() else []):
+        with open(rules, "a") as file:
+            file.write(f"{pattern}\n")
 
 
 def changed(workspace, listing):

@@ -1,0 +1,2 @@
+{"about": "web-py314 plus Node 22 with TypeScript 7.0.2, React and react-dom 19.3.1 and their types (read-only node_modules from an exact lock, no install scripts); tests run tsc and node --test through subprocess, and render components with react-dom/server (no browser)",
+ "npm": true}

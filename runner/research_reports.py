@@ -2,6 +2,7 @@
 
 import html
 import json
+import math
 from urllib.parse import urlsplit
 from api_review import LIVE_MODELS
 from research_sources import source_text
@@ -161,11 +162,37 @@ def shape(value, schema):
         )
     if kind == "integer":
         return type(value) is int and schema["minimum"] <= value <= schema["maximum"]
+    if kind == "number":
+        return (
+            type(value) in (int, float)
+            and math.isfinite(value)
+            and schema.get("minimum", -math.inf) <= value <= schema.get("maximum", math.inf)
+        )
     return (
         isinstance(value, str)
         and bool(value.strip())
         and (value in schema["enum"] if "enum" in schema else schema["minLength"] <= len(value) <= schema["maxLength"])
     )
+
+
+def checkable(schema):
+    """True if shape() can check any JSON value against schema: its subset of JSON Schema, with the bounds it reads."""
+    if not isinstance(schema, dict):
+        return False
+    kind = schema.get("type")
+    if kind == "object":
+        return isinstance(schema.get("properties"), dict) and all(map(checkable, schema["properties"].values()))
+    if kind == "array":
+        return all(type(schema.get(k)) is int for k in ("minItems", "maxItems")) and checkable(schema.get("items"))
+    if kind == "integer":
+        return all(type(schema.get(k)) in (int, float) for k in ("minimum", "maximum"))
+    if kind == "number":
+        return all(type(schema.get(k, 0)) in (int, float) for k in ("minimum", "maximum"))
+    if kind != "string":
+        return False
+    if "enum" in schema:
+        return isinstance(schema["enum"], list) and all(isinstance(v, str) for v in schema["enum"])
+    return all(type(schema.get(k)) is int for k in ("minLength", "maxLength"))
 
 
 def citation_failures(value, sources, path=""):

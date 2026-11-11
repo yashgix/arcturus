@@ -1,12 +1,12 @@
 """Arcturus pipeline: companies from the radar move through a persistent queue (research, decide project / fast /
-skip, spec, build, test, review, repair, final review, outreach draft), several at once, under one grant.
+skip, spec, spec check, build, test, review, repair, final review, outreach draft), several at once, under one grant.
 
   python3 -B runner/pipeline.py RUN admit --count 3        # take the best companies from the radar shortlist
   python3 -B runner/pipeline.py RUN grant --ceiling 12      # prints the approval; Touch ID when the run starts
   /usr/bin/env -i PATH=/usr/bin:/bin HOME=$HOME USER=$USER python3 -B runner/pipeline.py RUN run
   python3 -B runner/pipeline.py RUN status|report|pause|resume|stop
   python3 -B runner/pipeline.py RUN override COMPANY project|fast|skip
-  python3 -B runner/pipeline.py RUN revise COMPANY... --reason "why" [--rebuild]   # parked: revise the spec
+  python3 -B runner/pipeline.py RUN revise COMPANY... --reason "why" [--rebuild|--replan]   # parked: revise the spec
   python3 -B runner/pipeline.py RUN retry COMPANY...                    # parked: continue from its checkpoints
 
 Nothing is sent, applied for or published. routing.json in RUN is read before every step, so edits apply at once."""
@@ -58,10 +58,12 @@ OPERATIONS = [
     "capability",
     "data",
     "spec",
+    "consistency",
     "plan",
     "build",
     "repair",
     "review",
+    "experiment",
     "notes",
     "outreach",
 ]
@@ -535,23 +537,28 @@ class Pipeline:
                 )
                 return None
             if progress.get("pending"):  # decided before any crash, made once: a restart never skips it
-                revise(self.root, cid, progress["pending"])
-                write_json(lane / "progress.json", progress := {**progress, "pending": None})
+                revise(self.root, cid, progress["pending"], replan=progress.get("replan", False))
+                write_json(lane / "progress.json", progress := {**progress, "pending": None, "replan": False})
             last = progress["milestone"] >= len(milestones)
             kind, value = self.attempt(company, decision, note, last)
+            counter = {"respec": "respecs", "contradiction": "checks"}.get(kind)
             if (
-                kind == "respec"
-                and progress["respecs"] < limits["respecs"]
+                counter
+                and progress.get(counter, 0) < limits.get(counter, 1)
                 and self.budget_left(cid) >= limits["round_usd"]
             ):
                 note(f"spec or test at fault; revising: {value[:200]}")
                 write_json(
                     lane / "progress.json",
-                    {**progress, "respecs": progress["respecs"] + 1, "pending": "auto: " + value},
+                    {**progress, counter: progress.get(counter, 0) + 1, "pending": "auto: " + value},
                 )
                 continue
             if kind != "accepted":
-                reason = value if kind == "parked" else f"final review: spec or test fault, revision used up: {value}"
+                reason = {
+                    "parked": value,
+                    "respec": f"final review: spec or test fault, revision used up: {value}",
+                    "contradiction": f"the spec still contradicts itself after its revision: {value}",
+                }[kind]
                 write_json(lane / "project-status.json", {"state": "parked", "reason": reason[:500], "at": time.time()})
                 self.queue.set(cid, "parked", reason)
                 note(f"project parked: {reason[:200]}")
@@ -567,6 +574,7 @@ class Pipeline:
                 {
                     "milestone": k + 1,
                     "respecs": 0,
+                    "replan": True,
                     "pending": f"auto: milestone {k + 1} of {len(milestones)}: {milestones[k]}",
                 },
             )
@@ -586,9 +594,15 @@ class Pipeline:
         spec = self.steps.spec(company, decision, listing)
         if spec is None:
             return "parked", "no model could write the spec"
+        if found := self.steps.consistency(company, spec):
+            evidence = steps.contradictions(found, spec)
+            if given:  # a hand-written spec is never rewritten by a model
+                return "parked", f"the seeded spec contradicts itself; correct the seed: {evidence}"
+            return "contradiction", evidence
         config = self.router.config()
         revision = read(self.steps.lane(company, "pipeline") / "revise.json")
-        keep_code = bool(revision) and not revision.get("rebuild")
+        # A revision keeps the code built so far; one made before any build (the spec check) has none to keep.
+        keep_code = bool(revision) and not revision.get("rebuild") and (base / "repo").exists()
         evidence = steps.company_evidence(self.steps.lane(company, "routed"), decision)
         manifest = steps.materialize(base, company, spec, self.manifest["keys"], config["repairs"], keep_code, evidence)
         if not build.test_ids(manifest["protected"]["dir"], manifest["protected"]["pattern"]):
@@ -599,6 +613,9 @@ class Pipeline:
         if listing or (base / "repo" / real_data.FOLDER).exists():  # after git exists, so it is ignored from the start
             steps.ProjectBuild(self.root, {**manifest, "builder": None, "reviewer": None}).prepare("json")
             real_data.place(base, base / "arms" / "json")
+        if manifest["node_modules"]:
+            steps.ProjectBuild(self.root, {**manifest, "builder": None, "reviewer": None}).prepare("json")
+            steps.link_node_modules(base, base / "arms" / "json", manifest["node_modules"])
         with self.build_slot(company["id"], note):
             self.machine.wait_for_room(note, self.steps.gate)
             note("build")
@@ -650,11 +667,32 @@ class Pipeline:
         claim made from them supported, interview notes included; else (None, why). Claims that go too far get one
         wording repair (README and docs only)."""
         env, runs = steps.experiment_environment(pb), []
-        for n in (1, 2):
+        config, declared = self.router.config(), pb.manifest["llm"]
+        models = declared["models"]
+        if outside := sorted(set(models) - set(config["steps"].get("experiment", []))):
+            return None, f"experiment models outside this run's experiment route: {', '.join(outside)}"
+        if models and declared["max_usd"] > config["recovery"]["company_usd"]:
+            return None, (
+                f"the spec's llm max_usd {declared['max_usd']} is above this run's company budget "
+                f"(${config['recovery']['company_usd']})"
+            )
+        # A recorded run 1 of this spec and these files is not paid for again after a pause or restart: replay it.
+        first, key = (
+            pb.lane(pb.company, "json") / "experiment-run1.json",
+            [steps.experiment_fingerprint(pb), steps.files_digest(pb)],
+        )
+        if models and (read(first) or {}).get("key") == key:
+            runs.append(read(first)["metrics"])
+            note("experiment run 1 of 2 already recorded for these files")
+        for n in range(1 + len(runs), 3):  # with models, run 1 records live calls and run 2 replays them
             note(f"experiment run {n} of 2")
-            value, problems = steps.run_experiment(pb, env)
+            value, problems = steps.run_experiment(
+                pb, env, steps.experiment_broker(pb, replay=n == 2, budget_usd=self.budget_left(pb.company["id"]))
+            )
             if problems:
                 return None, "experiment: " + "; ".join(problems)
+            if n == 1 and models:
+                write_json(first, {"key": key, "metrics": value})
             runs.append(value)
         if runs[0] != runs[1]:
             return None, "experiment not reproducible: " + ", ".join(k for k in runs[0] if runs[0][k] != runs[1][k])
@@ -664,15 +702,27 @@ class Pipeline:
             {"files": [{"path": "results/metrics.json", "text": json.dumps(metrics, indent=1) + "\n"}]},
             "Experiment metrics, measured by the runner",
         )
+        if problem := steps.render_docs(pb, env):
+            return None, problem
         notes(metrics)
+        calls = steps.call_summary(pb) if models else None
         for n in range(2):
-            result = steps.results_review(pb, self.router, metrics, n)
+            result = steps.results_review(pb, self.router, metrics, n, calls)
             if result is None:
                 return None, "no results review came back"
             if not steps.blocking(result["review"]):
+                if models:  # committed after the check, which gets its summary: it would use up the files budget
+                    pb.write_files(
+                        "json",
+                        {"files": [{"path": steps.LLM_CALLS, "text": steps.recorded_calls(pb).read_text()}]},
+                        "Model calls of the experiment, recorded by the runner",
+                    )
                 return metrics, None
             if n or not steps.docs_only(result["review"]) or not self.repair_claims(pb, result):
                 break
+            if problem := steps.render_docs(pb, env):  # a generated doc is re-rendered over whatever the repair wrote
+                undo_claims(pb, result["commit"], "the docs generator failed on it")
+                return None, f"after the wording repair (undone), {problem}"
         reasons = [f["problem"][:150] for f in steps.blocking(result["review"])][:2]
         return None, "results not supported: " + "; ".join(reasons)
 
@@ -704,9 +754,7 @@ class Pipeline:
         notes = self.steps.notes(company, decision, result, pb.spec)
         if notes:
             pb.write_files(
-                "json",
-                {"files": [{"path": "docs/INTERVIEW.md", "text": steps.interview_notes(notes)}]},
-                "Interview notes",
+                "json", {"files": [{"path": steps.INTERVIEW, "text": steps.interview_notes(notes)}]}, "Interview notes"
             )
 
     def finish(self, pb, note):
@@ -769,14 +817,25 @@ class Pipeline:
         own, hidden = pb.test("json", f"repaired{n}")
         outcome = {**own, **hidden}
         passing = [k for k, v in outcome.items() if v == "ok"]
-        blamed = {f["path"] for f in before["review"]["findings"] if f["cause"] == "test"}
-        edited = {p for p in steps.changed_files(pb, before["commit"]) if p.startswith("tests/")} - blamed
+        blamed = [f for f in before["review"]["findings"] if f["cause"] == "test"]
+        changed = {p for p in steps.changed_files(pb, before["commit"]) if p.startswith("tests/")}
+        edited = changed - {f["path"] for f in blamed}
         bent = [
             t
             for t in before["own"]["not_ok"]
             if outcome.get(t, "gone") in ("ok", "gone") and f"tests/{t.split('.')[0]}.py" in edited
         ]
-        return steps.regressed(before, {"passing": passing}) + sorted(bent)
+        # A test a finding names as contradicting the spec may be rewritten or renamed by the repair it asked for.
+        return [
+            t
+            for t in steps.regressed(before, {"passing": passing})
+            if not any(
+                f["path"] in changed
+                and f["path"] == f"tests/{t.split('.')[0]}.py"
+                and re.search(rf"\b{t.split('.')[-1]}\b", f["problem"] + f["fix"])
+                for f in blamed
+            )
+        ] + sorted(bent)
 
     def budget_left(self, company_id):
         _, known, held = spend(self.steps.ledger.rows(), company_id)
@@ -785,13 +844,14 @@ class Pipeline:
     def over_budget(self, company_id, limits, note):
         """The company's recovery budget is soft: room for one more round (a repair and its recheck, estimated) must
         be left, so it can be passed by that estimate's error. The grant's ceiling is the hard limit on every call."""
-        if self.budget_left(company_id) >= limits["round_usd"]:
+        needed = self.round_estimate(company_id, limits)
+        if self.budget_left(company_id) >= needed:
             return False
-        note(
-            f"recovery stops: under ${limits['round_usd']:.2f} left of the ${limits['company_usd']:.2f} soft "
-            "company budget"
-        )
+        note(f"recovery stops: under ${needed:.2f} left of the ${limits['company_usd']:.2f} soft company budget")
         return True
+
+    def round_estimate(self, company_id, limits):
+        return next_round(self.steps.ledger.rows(), company_id, limits["round_usd"])
 
     def stronger(self, pb):
         return next((m for m in self.router.candidates("escalate") if m != pb.manifest["builder"]), None)
@@ -909,6 +969,18 @@ def deepseek_balance(key):
         return None
     finally:
         connection.close()
+
+
+def next_round(rows, company_id, fixed):
+    """The room one more repair round needs: twice this project's costliest measured repair plus its costliest
+    recheck (margin for a stronger model), never more than the fixed estimate; the fixed one before any is measured.
+    A small, nearly finished build then keeps room for the rounds it actually costs."""
+    charges = [(r["step"], r["charge"]) for r in rows if r["lane"] == f"{company_id}/json" and r["charge"]]
+    repair = max((c for step, c in charges if step.startswith("repair-")), default=None)
+    recheck = max((c for step, c in charges if step.startswith("review-final")), default=None)
+    if repair is None or recheck is None:
+        return fixed
+    return min(fixed, 2 * (repair + recheck) / 1e6)
 
 
 def spend(rows, company_id):
@@ -1173,10 +1245,11 @@ def draft_grant(root, ceiling, calls, hours, standing=None):
     return grants.write(root, grants.draft("build", scope, models, ceiling, calls, hours))
 
 
-def revise(root, company_id, reason, rebuild=False):
+def revise(root, company_id, reason, rebuild=False, replan=False):
     """Send a parked project back through spec and build: the spec is revised, the research is kept, and the
     earlier rounds move to attempt-N so their checkpoints are not replayed. The code is kept and repaired, or with
-    rebuild (a design change that repairs cannot make, such as removing files) set aside and built fresh."""
+    rebuild (a design change that repairs cannot make, such as removing files) set aside and built fresh. replan
+    (a new milestone) keeps the code but sets aside the plan and build checkpoints, so the new work is built."""
     lane = root / "lanes" / company_id / "json"
     n = 1 + sum(1 for p in lane.glob("attempt-*"))
     if rebuild:  # the code first: a failure here leaves the checkpoints where they were
@@ -1186,16 +1259,16 @@ def revise(root, company_id, reason, rebuild=False):
                 (base / f"attempt-{n}").mkdir(parents=True, exist_ok=True)
                 (base / name).rename(base / f"attempt-{n}" / name)
     archive = lane / f"attempt-{n}"
-    archive.mkdir()
+    archive.mkdir(parents=True)  # a spec check revises before any build made the lane
     for path in lane.iterdir():
-        if path.is_file() and (rebuild or not path.name.startswith(("plan", "build-"))):
+        if path.is_file() and (rebuild or replan or not path.name.startswith(("plan", "build-"))):
             path.rename(archive / path.name)
     specs = root / "lanes" / company_id / "pipeline"
     if (specs / "spec-2.json").exists():  # the next revision starts from the latest spec, the first one kept
         if (specs / "spec.json").exists():  # gone only if a crash came between the two renames: safe to redo
             (specs / "spec.json").rename(specs / f"spec-before-attempt-{n}.json")
         (specs / "spec-2.json").rename(specs / "spec.json")
-    write_json(specs / "revise.json", {"reason": reason, "at": time.time(), "rebuild": rebuild})
+    write_json(specs / "revise.json", {"reason": reason, "at": time.time(), "rebuild": rebuild, "replan": replan})
     (specs / "project-status.json").unlink(missing_ok=True)
     log_revision(specs, reason)
     Queue(root).set(company_id, "decided", f"revising: {reason[:200]}")
@@ -1208,8 +1281,9 @@ def undo_claims(pb, before, why):
 
 def seed(root, company_id, path):
     """A project Yash chose and specified by hand (path: JSON with title, why, data, spec, tests, repo, commit,
-    package, environment, also_test_in, experiment_minutes, metrics). Its spec and hidden tests pass the same checks
-    as a model's; the decide and spec steps then use them as written, and the build starts from the repo's commit.
+    package, environment, also_test_in, experiment_minutes, metrics, llm, generated_docs). Its spec and hidden tests
+    pass the same checks as a model's; the decide and spec steps then use them as written, and the build starts from
+    the repo's commit.
     'data' states the data it uses, with source and license (or "none"), since no data search runs for it."""
     given = json.loads(Path(path).read_text())
     if not isinstance(given.get("data"), str) or not given["data"].strip():
@@ -1224,9 +1298,11 @@ def seed(root, company_id, path):
         "also_test_in": given.get("also_test_in", []),
         "experiment_minutes": given.get("experiment_minutes", 0),
         "metrics": given.get("metrics", []),
+        "llm": given.get("llm", steps.NO_LLM),
         "spec_markdown": Path(given["spec"]).read_text() + fixed_section(given),
         "acceptance_tests": tests,
         "data_paths": given.get("data_paths", []),
+        "generated_docs": given.get("generated_docs", []),
     }
     if not shape(spec, steps.SCHEMAS["spec"]):
         raise ValueError("the given spec does not match the spec schema (fields, environments, limits)")
@@ -1413,6 +1489,7 @@ def main(argv=None):
     parser.add_argument("--standing", type=int, help="grant: a standing allowance for this many companies")
     parser.add_argument("--reason", default="")
     parser.add_argument("--rebuild", action="store_true", help="revise: set the code aside and build fresh")
+    parser.add_argument("--replan", action="store_true", help="revise: keep the code, plan and build again")
     parser.add_argument("--file", type=Path, help="seed: the hand-written project's JSON")
     parser.add_argument("args", nargs="*")
     parser.add_argument("--count", type=int, default=3)
@@ -1437,12 +1514,13 @@ def main(argv=None):
         elif args.command == "retry":
             for company in args.args:
                 log_revision(root / "lanes" / company / "pipeline", "retry by hand")
+                (root / "lanes" / company / "pipeline" / "project-status.json").unlink(missing_ok=True)
                 Queue(root).set(company, "decided", "retrying with its work kept")
         elif args.command == "revise":
             if not args.reason:
                 raise ValueError("say why with --reason; the spec model reads it")
             for company in args.args:
-                revise(root, company, args.reason, args.rebuild)
+                revise(root, company, args.reason, args.rebuild, args.replan)
         elif args.command == "seed":
             seed(root, args.args[0], args.file)
         elif args.command == "override":

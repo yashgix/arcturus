@@ -1,30 +1,40 @@
 """Pipeline queue under one signed grant: fake API providers, fake Max and Plus, real Seatbelt test runs, real git."""
 
+from fnmatch import fnmatch
 import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+import urllib.error
+import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runner"))
+import broker
 import build
 import dossier
 import environments
 from grant_fixture import keys, sign, signed_root
 import grant as grants
+import llm
 import pipeline
 import pipeline_steps
 import real_data
+from research_reports import shape
 import routing
 import sandbox
 import subscriptions
+import test_broker
 from test_dossier import PAGE, Provider, digest
+import workflow
 
 SPEC = "Package calc: calc/ops.py defines add(a, b) returning a + b. demo.py prints add(2, 3)."
 GOOD = "def add(a, b):\n    return a + b\n"
@@ -57,6 +67,78 @@ READS_DATA = {
     "class D(unittest.TestCase):\n    def test_rows(self):\n        self.assertEqual("
     "Path('real_data/rows/rows.csv').read_text(), 'a,b\\n1,2\\n')\n",
 }
+# A task only test experiments send, so the fixture provider can answer their model calls.
+PROBE = "Test experiment: double n."
+PROBE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["doubled"],
+    "properties": {"doubled": {"type": "integer", "minimum": 0, "maximum": 100}},
+}
+# experiment.py's model client, as LLM_ACCESS tells spec writers: plain urllib to the broker, token from the env.
+ASK = (
+    "import os, urllib.request\n"
+    "def ask(n, **extra):\n"
+    "    body = json.dumps({'model': 'claude-haiku-5-5', 'system': 'Double n.', 'input': {'task': "
+    + repr(PROBE)
+    + ", 'n': n, **extra}, 'schema': "
+    + repr(PROBE_SCHEMA)
+    + "}).encode()\n"
+    "    request = urllib.request.Request(os.environ['ARCTURUS_LLM_URL'] + '/call', body, {'Authorization': "
+    "'Bearer ' + os.environ['ARCTURUS_LLM_TOKEN'], 'Content-Type': 'application/json'})\n"
+    "    with urllib.request.urlopen(request, timeout=60) as response:\n"
+    "        return json.load(response)\n"
+)
+CONNECTS = (
+    "import socket\ndef connects(port):\n    try:\n"
+    "        socket.create_connection(('127.0.0.1', port), 2).close()\n        return 1\n"
+    "    except OSError:\n        return 0\n"
+)
+# A TypeScript module, a React view over it, a node test and the Python tests that compile and run them.
+TS_HELPERS = (
+    "import os\nimport subprocess\nimport tempfile\n\nNODE, MODULES = os.environ['ARCTURUS_NODE'], "
+    "os.environ['ARCTURUS_NODE_MODULES']\n\n\ndef node(*args, **env):\n"
+    "    return subprocess.run([NODE, *args], capture_output=True, text=True, timeout=120,\n"
+    "                          env={**os.environ, 'NODE_PATH': MODULES, **env})\n\n\ndef compiled():\n"
+    "    out = tempfile.mkdtemp()\n"
+    "    tsc = node(MODULES + '/typescript/bin/tsc', '-p', 'web/tsconfig.json', '--outDir', out)\n"
+    "    assert tsc.returncode == 0, tsc.stdout + tsc.stderr\n    return out\n"
+)
+WEB_FILES = {
+    "web/tsconfig.json": '{"compilerOptions": {"jsx": "react-jsx", "module": "commonjs", "target": "es2022", '
+    '"strict": true, "esModuleInterop": true, "skipLibCheck": true, "types": []}, '
+    '"include": ["*.ts", "*.tsx"]}\n',
+    "web/sum.ts": "export function total(xs: number[]): number {\n  return xs.reduce((a, b) => a + b, 0);\n}\n",
+    "web/Total.tsx": 'import { total } from "./sum";\n\nexport function Total({ xs }: { xs: number[] }) {\n'
+    '  return <p id="total">{total(xs)}</p>;\n}\n',
+    "web/total.test.cjs": "const test = require('node:test');\nconst assert = require('node:assert');\n"
+    "const { total } = require(require('node:path').join(process.env.COMPILED, 'sum.js'));\n\n"
+    "test('sums', () => assert.strictEqual(total([1, 2]), 3));\n",
+    "tests/test_web.py": "import unittest\n\n" + TS_HELPERS + "\n\nclass Web(unittest.TestCase):\n"
+    "    def test_node_tests_pass(self):\n"
+    "        run = node('--test', 'web/total.test.cjs', COMPILED=compiled())\n"
+    "        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)\n",
+}
+RENDERS = {
+    "name": "test_p_view.py",
+    "text": "import unittest\n\n" + TS_HELPERS + "\n\nclass View(unittest.TestCase):\n"
+    "    def test_total_renders(self):\n        out = compiled()\n"
+    "        script = (\"const { renderToStaticMarkup } = require('react-dom/server');\"\n"
+    "                  \"const { createElement } = require('react');\"\n"
+    "                  \"const { Total } = require(process.argv[1] + '/Total.js');\"\n"
+    "                  \"const view = createElement(Total, { xs: [1, 2, 3] });\"\n"
+    "                  \"process.stdout.write(renderToStaticMarkup(view));\")\n"
+    "        run = node('-e', script, out)\n"
+    "        self.assertEqual(run.stdout, '<p id=\"total\">6</p>', run.stderr)\n",
+}
+# Its second quote differs from test_p_1 only in spacing, which the check must allow.
+CONTRADICTION = {
+    "first": "add(a, b) returning a + b",
+    "second": "self.assertEqual(add(1, 1),  2)",
+    "where": "SPEC.md, test_p_1.py",
+    "example": "add(1, 1)",
+    "why": "Illustrative.",
+}
 DATA_PAGES = pipeline_steps.Steps.data_pages  # setUp replaces it with captured pages; a test may restore it
 CORRECTNESS = {
     "path": "calc/ops.py",
@@ -84,6 +166,11 @@ class Fakes(Provider):
         self.notes_packets, self.metric_names, self.results_findings, self.results_packets = [], [], [], []
         self.also_test_in, self.stack, self.decide_packets, self.capability_packets = [], ["Python"], [], []
         self.needed_by = [1]
+        self.llm = pipeline_steps.NO_LLM
+        self.contradictions = []  # one round's contradictions per spec check, first round first
+        self.spec_markdown = SPEC
+        self.extra_hidden = []
+        self.generated_docs = []
 
     def reply(self, host, body):
         self.bodies.append(body)
@@ -167,17 +254,22 @@ class Fakes(Provider):
 
     def spec(self, packet):
         self.specs.append(packet)
-        hidden = HIDDEN + ([READS_DATA] if packet["real_data"] else [])
+        hidden = HIDDEN + ([READS_DATA] if packet["real_data"] else []) + self.extra_hidden
         return {
             "package": "calc",
             "environment": self.environment,
             "also_test_in": self.also_test_in,
             "experiment_minutes": self.experiment_minutes,
             "metrics": self.metric_names,
-            "spec_markdown": SPEC,
+            "llm": self.llm,
+            "spec_markdown": self.spec_markdown,
             "acceptance_tests": hidden,
             "data_paths": [],
+            "generated_docs": self.generated_docs,
         }
+
+    def probe(self, packet):
+        return {"doubled": packet["n"] * 2}
 
     def data_search(self, packet):
         return {"queries": ["calc rows dataset"]}
@@ -286,6 +378,9 @@ class Fakes(Provider):
         findings = self.results_findings.pop(0) if self.results_findings else []
         return {"verdict": "changes" if findings else "approve", "summary": "Results.", "findings": findings}
 
+    def consistency(self, packet):
+        return {"contradictions": self.contradictions.pop(0) if self.contradictions else []}
+
     def respec(self, packet):
         self.on_step.pop("respec", lambda: None)()
         return self.spec(packet)
@@ -371,7 +466,7 @@ class Queue(unittest.TestCase):
         self.plus_limit = None  # a reset time: the next Plus call is refused until then
         self.plan_calls, self.pages = [], []  # pages: what the free data search captured (none by default)
         # The fixture finds each step by its task text; teach it the build and pipeline tasks too.
-        tasks = {**dossier.TASKS, **build.TASKS, **pipeline_steps.TASKS}
+        tasks = {**dossier.TASKS, **build.TASKS, **pipeline_steps.TASKS, "probe": PROBE}
         for patcher in (
             patch.dict(dossier.TASKS, tasks),
             patch.object(subscriptions, "claude", self.claude),
@@ -918,6 +1013,48 @@ class Queue(unittest.TestCase):
     def test_a_failing_test_deleted_is_undone(self):
         self.bend_then_fix(OWN.replace("    def test_add", "    def check_add"))
 
+    def rename_blamed_test(self, named):
+        self.only_acme_builds()
+        self.fakes.findings = [
+            {
+                "path": "tests/test_ops.py",
+                "severity": "high",
+                "category": "correctness",
+                "cause": "test",
+                "problem": f"T.{named} contradicts the spec.",
+                "why_it_matters": "Wrong expectation.",
+                "fix": "Correct the test.",
+            }
+        ]
+        renamed = OWN.replace("    def test_add", "    def test_add_matches_spec")
+        self.fakes.on_repair = {
+            "deepseek-flash": lambda: (
+                self.fakes.findings.clear(),
+                {"files": [{"path": "tests/test_ops.py", "text": renamed}], "notes": "n"},
+            )[1]
+        }
+        self.execute()
+        return (self.lane("acme") / "notes.jsonl").read_text()
+
+    def test_a_passing_test_the_review_blamed_may_be_renamed_by_its_repair(self):
+        notes = self.rename_blamed_test("test_add")
+        self.assertNotIn("broke or bent", notes)
+        self.assertTrue(json.loads((self.lane("acme") / "project.json").read_text())["accepted"])
+
+    def test_a_passing_test_removed_when_the_review_blamed_another_is_undone(self):
+        self.assertIn("repair 1 broke or bent 1 tests (test_ops.T.test_add)", self.rename_blamed_test("test_sub"))
+
+    def test_the_package_may_ship_yaml_and_json_data_files(self):
+        allowed = pipeline_steps.allowed_paths({"package": "calc", "environment": "stdlib"})
+        self.assertTrue(
+            all(
+                any(fnmatch(p, g) for g in allowed)
+                for p in ("calc/specs/rules.yaml", "calc/data/rows.json", "calc/ops.py")
+            )
+        )
+        self.assertFalse(any(fnmatch(p, g) for g in allowed for p in ("calc/run.sh", "setup.py", "calc/x.pth")))
+        self.assertTrue(pipeline_steps.DATA_PATH.fullmatch("specs/*.yaml"))
+
     def test_every_repair_goes_through_the_guarded_final_gate(self):
         self.only_acme_builds()
         self.fakes.buggy = True
@@ -974,16 +1111,107 @@ class Queue(unittest.TestCase):
         self.assertIn("revision used up", status["reason"])
         self.assertEqual([s for _, _, s in self.plan_calls].count("respec"), 1)
 
+    def contradict(self, rounds):
+        self.only_acme_builds()
+        self.fakes.contradictions = [[CONTRADICTION]] * rounds
+        self.fakes.on_step["respec"] = lambda: setattr(self.fakes, "spec_markdown", SPEC + " Revised.")
+
+    def builds(self, run, cid="acme"):
+        return [r for r in run.steps.ledger.rows() if r["lane"] == f"{cid}/json" and r["step"].startswith("build")]
+
+    def test_a_contradiction_found_before_the_build_gets_one_revision_then_builds(self):
+        self.contradict(1)
+        run = self.execute()
+        self.assertTrue(json.loads((self.lane("acme") / "project.json").read_text())["accepted"])
+        self.assertEqual([s for _, _, s in self.plan_calls].count("respec"), 1)
+        reason = routing.read(self.lane("acme") / "revise.json")["reason"]
+        self.assertTrue(reason.startswith("auto: spec check: "), reason)
+        self.assertIn("(test_p_1.py)", reason, "the test holding a quote may be corrected")
+        checks = [s for _, _, s in self.fakes.calls if s == "consistency"]
+        self.assertEqual(len(checks), 2, "the revised spec is checked again")
+        self.assertEqual(len({r["step"] for r in self.builds(run) if r["step"] == "build-1"}), 1, "built once")
+
+    def test_a_check_cut_off_by_reasoning_alone_moves_to_the_next_model_without_a_same_model_retry(self):
+        """A model that spends its whole output limit on reasoning is not asked again; the next model is."""
+        self.fakes.thinking = {("deepseek-v4-pro", "consistency")}
+        run = self.execute()
+        self.assertTrue(json.loads((self.lane("acme") / "project.json").read_text())["accepted"])
+        checks = [
+            (r["model"], r["state"])
+            for r in run.steps.ledger.rows()
+            if r["lane"] == "acme/pipeline" and r["step"].startswith("consistency")
+        ]
+        self.assertEqual(checks, [("deepseek-v4-pro", "truncated"), ("claude-haiku-5-5", "received")])
+        failed = json.loads(next((self.lane("acme", "pipeline")).glob("consistency-*.failed.json")).read_text())
+        self.assertEqual(failed["last_problems"], [workflow.THINKING_ONLY])
+
+    def test_after_a_restart_a_reasoning_only_cut_off_is_not_sent_again(self):
+        self.fakes.thinking = {("deepseek-v4-pro", "consistency")}
+        run = self.execute()
+        lane = self.lane("acme", "pipeline")
+        for done in [*lane.glob("consistency-*.json")]:
+            done.unlink()  # as if the run had stopped right after the cut-off
+        sent = len(self.fakes.calls)
+        run.steps.consistency(run.company("acme"), routing.read(self.lane("acme") / "spec.json"))
+        models = [m for _, m, s in self.fakes.calls[sent:] if s == "consistency"]
+        self.assertEqual(models, ["claude-haiku-5-5"], "the ledger remembers the cut-off across a restart")
+
+    def test_a_contradiction_left_after_its_revision_parks_before_any_build(self):
+        self.contradict(2)
+        run = self.execute()
+        self.assertTrue(self.parked("acme"))
+        status = json.loads((self.lane("acme") / "project-status.json").read_text())
+        self.assertIn("still contradicts itself", status["reason"])
+        self.assertEqual(self.builds(run), [], "nothing was built")
+
+    def test_a_contradiction_must_quote_the_spec_or_a_test_as_written(self):
+        spec = {"spec_markdown": SPEC, "acceptance_tests": HIDDEN}
+        made_up = {**CONTRADICTION, "second": "add must raise on 1"}
+        self.assertEqual(pipeline_steps.check_consistency({"contradictions": [CONTRADICTION]}, spec), [])
+        self.assertEqual(len(pipeline_steps.check_consistency({"contradictions": [made_up]}, spec)), 1)
+
+    def test_a_seeded_spec_that_contradicts_itself_parks_and_is_never_rewritten(self):
+        _, given, seed = self.seed_repo({"calc/__init__.py": '"""calc"""\n'})
+        self.write_seed(given, seed)
+        pipeline.main([str(self.run), "seed", "acme", "--file", str(given / "seed.json")])
+        self.fakes.contradictions = [[CONTRADICTION]]
+        run = self.execute()
+        status = json.loads((self.lane("acme") / "project-status.json").read_text())
+        self.assertIn("the seeded spec contradicts itself", status["reason"])
+        self.assertNotIn("respec", [s for _, _, s in self.plan_calls])
+        self.assertEqual(self.builds(run), [])
+
+    def test_a_grant_without_the_spec_check_builds_without_it_and_says_so(self):
+        self.only_acme_builds()
+        grant = self.draft()
+        grant["scope"]["operations"].remove("consistency")
+        (self.run / "grant.json").write_text(json.dumps(grant))
+        sign(self, grant)
+        self.fakes.contradictions = [[CONTRADICTION]]
+        self.execute()
+        self.assertTrue(json.loads((self.lane("acme") / "project.json").read_text())["accepted"])
+        self.assertNotIn("consistency", [s for _, _, s in self.fakes.calls])
+        self.assertIn("spec check skipped: not in this grant", (self.lane("acme") / "notes.jsonl").read_text())
+
+    def test_a_retry_clears_the_old_park_so_the_report_shows_the_new_outcome(self):
+        lane = self.lane("acme")
+        lane.mkdir(parents=True)
+        (lane / "project-status.json").write_text('{"state": "parked", "reason": "old", "at": 0}')
+        pipeline.main([str(self.run), "retry", "acme"])
+        self.assertFalse((lane / "project-status.json").exists())
+        self.assertEqual(self.states()["acme"][0], "decided")
+
     def test_a_revision_decided_before_a_crash_is_made_on_restart(self):
         self.only_acme_builds()
         self.fakes.milestones = ["The core.", "The study."]
         original, crashed = pipeline.revise, []
 
-        def revise(root, company_id, reason, rebuild=False):
+        def revise(root, company_id, reason, rebuild=False, replan=False):
             if not crashed:
                 crashed.append(reason)
                 raise KeyError("crash between deciding the next milestone and revising for it")
-            return original(root, company_id, reason, rebuild)
+            self.assertTrue(replan, "a new milestone is planned and built again")
+            return original(root, company_id, reason, rebuild, replan)
 
         with patch.object(pipeline, "revise", revise):
             self.execute()
@@ -1078,11 +1306,15 @@ class Queue(unittest.TestCase):
         self.assertIn("Missing LLM calls (milestones 2).", report)
         self.assertIn("Accepted with no rescue: 0 of 0 projects started", report)
         self.fakes.needs = []
+        plans = sum(1 for _, _, step in self.fakes.calls if step == "plan")
         with patch.dict(pipeline_steps.ENVIRONMENTS, {"llm": {"about": "LLM calls through the broker", "python": ""}}):
             pipeline.main([str(self.run), "retry", "acme"])
             self.execute()
         self.assertTrue(json.loads((lane / "project.json").read_text())["accepted"])
         self.assertIn("2 of 2: The LLM study.", routing.read(lane / "revise.json")["reason"])
+        # Milestone 1's plan and build checkpoints must not be replayed for milestone 2.
+        self.assertEqual(sum(1 for _, _, step in self.fakes.calls if step == "plan"), plans + 1)
+        self.assertTrue(list((self.run / "lanes" / "acme" / "json").glob("attempt-*/plan.json")))
 
     def test_selection_sees_the_same_research_whatever_the_runner_can_do(self):
         """The decide step's input carries nothing about the runner, so its choice cannot depend on it."""
@@ -1097,6 +1329,12 @@ class Queue(unittest.TestCase):
         for runner_word in (*pipeline_steps.ENVIRONMENTS, pipeline_steps.runner_can()[:30], "rust-1-90"):
             self.assertNotIn(runner_word, text)
         self.assertIn(pipeline_steps.runner_can(), json.dumps(self.fakes.capability_packets[0]))
+
+    def test_the_capability_check_is_told_experiment_calls_are_structured_output(self):
+        """The capability check knows every broker call carries a checked JSON Schema."""
+        text = pipeline_steps.runner_can()
+        self.assertIn("Every call is structured output", text)
+        self.assertIn("invalid", text)
 
     def test_the_capability_check_is_asked_again_once_the_runner_changes(self):
         first = pipeline_steps.capability_step()
@@ -1193,6 +1431,61 @@ class Queue(unittest.TestCase):
         self.assertTrue(project["accepted"])
         self.assertEqual(project["project_tests"]["passed"], 3, "the FastAPI and YAML tests ran in the web environment")
 
+    @unittest.skipUnless("web-ts-py314" in pipeline_steps.ENVIRONMENTS, "vetted TypeScript environment not here")
+    def test_a_typescript_and_react_project_is_built_compiled_and_rendered_in_the_node_environment(self):
+        """End to end through the real sandbox: the builder writes TypeScript and a React view in web/, the hidden
+        test compiles them with tsc and renders the view with react-dom/server; node_modules stays out of git."""
+        self.fakes.environment = "web-ts-py314"
+        self.fakes.files.update(WEB_FILES)
+        self.fakes.extra_hidden = [RENDERS]
+        self.execute()
+        project = json.loads((self.lane("acme") / "project.json").read_text())
+        self.assertTrue(project["accepted"])
+        self.assertEqual(project["acceptance_tests"]["passed"], 3, "the React view rendered in the hidden test")
+        self.assertEqual(project["project_tests"]["passed"], 2, "the node tests ran through the own Python test")
+        repo = Path(project["repo"])
+        self.assertTrue((repo / "node_modules").is_symlink())
+        tracked = subprocess.run(
+            ["/usr/bin/git", "--git-dir", str(repo.parent / "arms" / "json" / "git"), "ls-files"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()
+        self.assertIn("web/Total.tsx", tracked)
+        self.assertFalse([t for t in tracked if t.startswith("node_modules")], "the packages never enter git")
+
+    @unittest.skipUnless("web-ts-py314" in pipeline_steps.ENVIRONMENTS, "vetted TypeScript environment not here")
+    def test_a_typescript_type_error_fails_the_gate_and_its_repair_is_accepted(self):
+        self.only_acme_builds()
+        self.fakes.environment, self.fakes.extra_hidden = "web-ts-py314", [RENDERS]
+        self.fakes.files.update(
+            {**WEB_FILES, "web/sum.ts": "export function total(xs: number[]): number {\n  return 'none';\n}\n"}
+        )
+        fixed = {"files": [{"path": "web/sum.ts", "text": WEB_FILES["web/sum.ts"]}], "notes": "n"}
+        self.fakes.on_repair = {m: lambda: fixed for m in ("deepseek-flash", "deepseek-v4-pro")}
+        self.execute()
+        first = json.loads((self.lane("acme", "json") / "tests-final0.json").read_text())["protected"]
+        self.assertEqual(first["test_p_view.View.test_total_renders"], "fail", "tsc refused the type error")
+        project = json.loads((self.lane("acme") / "project.json").read_text())
+        self.assertTrue(project["accepted"])
+        self.assertEqual(project["acceptance_tests"]["passed"], 3)
+
+    def test_only_a_node_environment_lets_builders_write_typescript_and_never_package_json(self):
+        spec = {"package": "calc", "spec_markdown": SPEC, "acceptance_tests": HIDDEN}
+        base = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        company = {"id": "acme", "name": "Acme"}
+        with patch.dict(
+            pipeline_steps.ENVIRONMENTS,
+            {"node-env": {"python": sys.executable, "read": [], "about": "x", "env": {"ARCTURUS_NODE_MODULES": "/nm"}}},
+        ):
+            web = pipeline_steps.materialize(base, company, {**spec, "environment": "node-env"}, {}, 0)
+        plain = pipeline_steps.materialize(base, company, {**spec, "environment": "stdlib"}, {}, 0)
+        allowed = lambda m, path: any(fnmatch(path, g) for g in m["allowed"])
+        self.assertTrue(allowed(web, "web/Total.tsx") and allowed(web, "web/tsconfig.json"))
+        self.assertFalse(allowed(web, "package.json") or allowed(web, "web/package.json"))
+        self.assertFalse(allowed(plain, "web/Total.tsx"))
+        self.assertEqual((web["node_modules"], plain["node_modules"]), ("/nm", None))
+
     @unittest.skipUnless("browser-py314" in pipeline_steps.ENVIRONMENTS, "vetted browser environment not here")
     def test_a_playwright_project_drives_chromium_in_the_browser_environment(self):
         """End to end through the real sandbox: Playwright fills and submits a local page in headless Chromium."""
@@ -1251,6 +1544,149 @@ class Queue(unittest.TestCase):
         self.assertEqual((Path(project["repo"]) / "README.md").read_text(), "# calc\nx is 1.\n")
         self.assertTrue(list(self.lane("acme", "json").glob("review-results-1-*.json")), "rechecked after the repair")
 
+    RENDER = (
+        "import json, sys\nfrom calc.ops import add\n\nif '--out' in sys.argv:\n"
+        "    x = json.load(open('results/metrics.json'))['x']\n"
+        "    prose = open('README.md').read().split('<!-- results -->')[0]\n"
+        "    open(sys.argv[sys.argv.index('--out') + 1], 'w').write(prose + '<!-- results -->\\nx = %s\\n' % x)\n"
+        "else:\n    print(add(2, 3))\n"
+    )
+
+    def generated(self, render=None):
+        self.experiment("json.dump({'x': 7}, open(out, 'w'))\n")
+        self.fakes.files["demo.py"] = render or self.RENDER
+        self.fakes.generated_docs = [
+            {"path": "README.md", "command": ["demo.py", "--readme", "README.md", "--out", "{out}"]}
+        ]
+
+    def test_a_generated_doc_is_rendered_by_the_runner_from_the_measured_metrics(self):
+        self.generated()
+        self.execute()
+        project = json.loads((self.lane("acme") / "project.json").read_text())
+        repo = Path(project["repo"])
+        self.assertEqual((repo / "README.md").read_text(), "# calc\n<!-- results -->\nx = 7\n")
+        log = subprocess.run(
+            ["/usr/bin/git", "--git-dir", str(repo.parent / "arms" / "json" / "git"), "log", "--format=%s"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        self.assertIn("Generated docs, rendered by the runner", log)
+
+    def test_a_wording_repair_never_changes_generated_numbers_and_may_answer_a_docs_finding_filed_on_code(self):
+        self.generated()
+        wording = {
+            "path": "calc/ops.py",
+            "severity": "high",
+            "category": "docs",
+            "cause": "code",
+            "problem": "README calls x a guarantee.",
+            "why_it_matters": "Overclaims.",
+            "fix": "Say measured.",
+        }
+        self.fakes.results_findings = [[wording]]
+        self.fakes.on_repair["deepseek-flash"] = lambda: {
+            "files": [{"path": "README.md", "text": ("# calc\nx is measured.\n<!-- results -->\nx = 999\n")}],
+            "notes": "n",
+        }
+        self.execute()
+        project = json.loads((self.lane("acme") / "project.json").read_text())
+        self.assertEqual(
+            (Path(project["repo"]) / "README.md").read_text(), "# calc\nx is measured.\n<!-- results -->\nx = 7\n"
+        )
+
+    def test_generated_docs_survive_a_replay_and_the_results_review_sees_them(self):
+        self.generated()
+        original, crashed = pipeline_steps.results_review, []
+
+        def results_review(*args):
+            if not crashed:
+                crashed.append(True)
+                raise KeyError("crash after the render, before the results review")
+            return original(*args)
+
+        with patch.object(pipeline_steps, "results_review", results_review):
+            self.execute()
+            built = [c for c in self.fakes.calls if c[2] == "build"]
+            pipeline.main([str(self.run), "retry", "acme"])
+            self.execute()
+        self.assertTrue(crashed)
+        project = json.loads((self.lane("acme") / "project.json").read_text())
+        self.assertEqual((Path(project["repo"]) / "README.md").read_text(), "# calc\n<!-- results -->\nx = 7\n")
+        self.assertEqual([c for c in self.fakes.calls if c[2] == "build"], built, "the build was replayed, not paid")
+        reviewed = self.fakes.results_packets[-1]["files"]
+        self.assertIn("x = 7", json.dumps(reviewed), "the results review read the generated README")
+
+    def test_a_repair_that_breaks_the_docs_generator_is_undone_and_named(self):
+        self.generated(
+            render=self.RENDER.replace(
+                "prose = open", "assert '<!-- results -->' in open('README.md').read()\n    prose = open"
+            )
+        )
+        self.fakes.files["README.md"] = "# calc\n<!-- results -->\n"
+        wording = {
+            "path": "README.md",
+            "severity": "high",
+            "category": "docs",
+            "cause": "code",
+            "problem": "Overclaims.",
+            "why_it_matters": "Wrong.",
+            "fix": "Reword.",
+        }
+        self.fakes.results_findings = [[wording]]
+        self.fakes.on_repair["deepseek-flash"] = lambda: {
+            "files": [{"path": "README.md", "text": "# calc\nx.\n"}],
+            "notes": "n",
+        }
+        self.execute()
+        status = json.loads((self.lane("acme") / "project-status.json").read_text())
+        self.assertIn("after the wording repair (undone), the docs generator for README.md failed", status["reason"])
+        repo = sandbox.AREA / f"pipeline-{self.run.name}" / "acme" / "repo"
+        self.assertEqual((repo / "README.md").read_text(), "# calc\n<!-- results -->\nx = 7\n")
+
+    def test_a_docs_finding_on_code_the_repair_cannot_fix_parks_after_one_repair(self):
+        self.generated()
+        wording = {
+            "path": "experiment.py",
+            "severity": "high",
+            "category": "docs",
+            "cause": "code",
+            "problem": "A docstring overclaims.",
+            "why_it_matters": "Wrong.",
+            "fix": "Reword the docstring.",
+        }
+        self.fakes.results_findings = [[wording], [wording]]
+        self.fakes.on_repair["deepseek-flash"] = lambda: {
+            "files": [{"path": "README.md", "text": "# calc\n"}],
+            "notes": "n",
+        }
+        self.execute()
+        status = json.loads((self.lane("acme") / "project-status.json").read_text())
+        self.assertEqual(status["reason"], "results not supported: A docstring overclaims.")
+        self.assertEqual(len(list(self.lane("acme", "json").glob("review-results-*.json"))), 2, "one repair, bounded")
+
+    def test_a_failing_docs_generator_parks_the_project_with_its_reason(self):
+        self.generated(render="import sys\nsys.exit(3)\n")
+        self.execute()
+        status = json.loads((self.lane("acme") / "project-status.json").read_text())
+        self.assertIn("the docs generator for README.md failed (exit 3", status["reason"])
+
+    def test_generated_docs_name_a_result_doc_a_project_script_and_out_once(self):
+        good = {"path": "docs/RESULTS.md", "command": ["demo.py", "--out", "{out}"]}
+        spec = {"experiment_minutes": 1, "generated_docs": [good]}
+        self.assertEqual(pipeline_steps.generated_docs_problems(spec), [])
+        for bad in (
+            {**good, "path": "calc/ops.py"},
+            {**good, "command": ["tests/x.py", "{out}"]},
+            {**good, "command": ["demo.py"]},
+            {**good, "command": ["../x.py", "{out}"]},
+            {**good, "path": "docs/../results/x.md"},
+            {**good, "path": "docs/./x.md"},
+            {**good, "path": "docs/INTERVIEW.md"},
+        ):
+            self.assertTrue(pipeline_steps.generated_docs_problems({**spec, "generated_docs": [bad]}), bad)
+        self.assertTrue(pipeline_steps.generated_docs_problems({"generated_docs": [good]}), "needs an experiment")
+
     def test_a_results_repair_may_not_touch_code(self):
         self.experiment("json.dump({'x': 1}, open(out, 'w'))\n")
         self.fakes.results_findings = [
@@ -1299,6 +1735,141 @@ class Queue(unittest.TestCase):
         self.assertEqual(status["reason"], "results not supported: Overclaims.")
         repo = sandbox.AREA / f"pipeline-{self.run.name}" / "acme" / "repo"
         self.assertEqual((repo / "calc" / "ops.py").read_text(), GOOD)
+
+    def listener(self):
+        server = socket.create_server(("127.0.0.1", 0))
+        self.addCleanup(server.close)
+        return server.getsockname()[1]
+
+    def jobs(self):
+        """Every sandbox job the run starts, with the port and variables it was given."""
+        return self.enterContext(patch.object(sandbox, "run", side_effect=sandbox.run))
+
+    def test_an_experiment_calls_models_live_records_them_and_replays_them(self):
+        """End to end through the real sandbox: only the experiment's run reaches the broker, through its port."""
+        self.experiment(
+            ASK + "answers = [ask(n) for n in (1, 2, 3)]\n"
+            "json.dump({'doubled': [a['value']['doubled'] for a in answers], "
+            "'cost': sum(a['cost_microusd'] for a in answers)}, open(out, 'w'))\n",
+            ("doubled", "cost"),
+        )
+        self.fakes.llm = {"models": ["claude-haiku-5-5"], "max_calls": 10, "max_usd": 0.5}
+        self.fakes.files["demo.py"] = CONNECTS + f"print('connected' if connects({self.listener()}) else 'blocked')\n"
+        jobs = self.jobs()
+        run = self.execute()
+        project = json.loads((self.lane("acme") / "project.json").read_text())
+        self.assertTrue(project["accepted"])
+        cost = 1000 * 100 // 1000 + 500 * 500 // 1000  # the fixture's usage at Haiku's prices, in micro-USD
+        self.assertEqual(project["metrics"], {"doubled": [2, 4, 6], "cost": 3 * cost})
+        probes = [c for c in self.fakes.calls if c[2] == "probe"]
+        self.assertEqual(
+            probes, [("anthropic", "claude-haiku-5-5", "probe")] * 3, "run 2 was answered from the recording"
+        )
+        rows = [r for r in run.steps.ledger.rows() if r["lane"].startswith("acme/experiment-")]
+        self.assertEqual([r["step"] for r in rows], ["experiment-1", "experiment-2", "experiment-3"])
+        committed = (Path(project["repo"]) / "results" / "llm-calls.jsonl").read_text()
+        self.assertEqual(committed, (self.lane("acme", "json") / "llm-calls.jsonl").read_text())
+        self.assertEqual(len(committed.splitlines()), 3)
+        self.assertEqual(
+            self.fakes.results_packets[-1]["llm_calls"],
+            {"calls": 3, "models": ["claude-haiku-5-5"], "cost_usd": 3 * cost / 1e6, "held_usd": 0, "kinds": {"ok": 3}},
+        )
+        self.assertNotIn(
+            pipeline_steps.LLM_CALLS,
+            self.fakes.results_packets[-1]["files"],
+            "the results check gets the summary, not the recording",
+        )
+        self.assertEqual(len({r["lane"] for r in rows}), 1)
+        brokered = [c for c in jobs.call_args_list if c.kwargs.get("port")]
+        self.assertEqual(len(brokered), 2)
+        self.assertTrue(all("experiment.py" in c.args[0] for c in brokered))
+        self.assertFalse(
+            [c for c in jobs.call_args_list if c not in brokered and "ARCTURUS_LLM_URL" in c.args[3]],
+            "tests, demo and builds get neither port nor broker variables",
+        )
+        self.assertEqual(Path(project["demo"]["output"]).read_text(), "blocked\n")
+
+    def test_a_restart_after_run_1_replays_its_recording_and_never_pays_twice(self):
+        self.experiment(
+            ASK + "answers = [ask(n) for n in (1, 2, 3)]\n"
+            "json.dump({'x': sum(a['value']['doubled'] for a in answers)}, open(out, 'w'))\n"
+        )
+        self.fakes.llm = {"models": ["claude-haiku-5-5"], "max_calls": 3, "max_usd": 0.5}
+        original, crashed = pipeline_steps.run_experiment, []
+
+        def run_experiment(pb, env, model_broker):
+            if model_broker.recording is not None and not crashed:
+                crashed.append(True)
+                raise KeyError("crash between run 1 and run 2")
+            return original(pb, env, model_broker)
+
+        with patch.object(pipeline_steps, "run_experiment", run_experiment):
+            self.execute()
+            pipeline.main([str(self.run), "retry", "acme"])
+            self.execute()
+        self.assertTrue(crashed)
+        project = json.loads((self.lane("acme") / "project.json").read_text())
+        self.assertEqual(project["metrics"], {"x": 12})
+        self.assertEqual(len([c for c in self.fakes.calls if c[2] == "probe"]), 3, "max_calls 3: paid once")
+        self.assertEqual(len((self.lane("acme", "json") / "llm-calls.jsonl").read_text().splitlines()), 3)
+        self.assertIn("run 1 of 2 already recorded", (self.lane("acme") / "notes.jsonl").read_text())
+
+    def test_an_experiment_without_llm_gets_no_broker_and_no_network(self):
+        self.experiment(
+            CONNECTS + f"json.dump({{'connected': connects({self.listener()}), "
+            "'has_url': int('ARCTURUS_LLM_URL' in __import__('os').environ)}, open(out, 'w'))\n",
+            ("connected", "has_url"),
+        )
+        jobs = self.jobs()
+        self.execute()
+        project = json.loads((self.lane("acme") / "project.json").read_text())
+        self.assertEqual(project["metrics"], {"connected": 0, "has_url": 0})
+        self.assertFalse((Path(project["repo"]) / "results" / "llm-calls.jsonl").exists())
+        self.assertFalse([c for c in jobs.call_args_list if c.kwargs.get("port")])
+        self.assertNotIn("llm_calls", self.fakes.results_packets[-1])
+
+    def test_a_replay_that_meets_a_new_request_parks_the_project(self):
+        self.experiment(
+            ASK + "import time\nanswers = [ask(1, at=time.time())]\n"
+            "json.dump({'x': answers[0]['value']['doubled']}, open(out, 'w'))\n"
+        )
+        self.fakes.llm = {"models": ["claude-haiku-5-5"], "max_calls": 10, "max_usd": 0.5}
+        self.execute()
+        status = json.loads((self.lane("acme") / "project-status.json").read_text())
+        self.assertEqual(status["reason"], "experiment: model broker stopped: call is not in the recording")
+        self.assertEqual(len([c for c in self.fakes.calls if c[2] == "probe"]), 1)
+
+    def test_credential_shaped_text_from_an_experiment_is_not_sent_and_parks_only_its_project(self):
+        self.experiment(
+            ASK + "answers = [ask(1, note='API_' + 'KEY=' + 'abcdefgh12345678')]\njson.dump({'x': 1}, open(out, 'w'))\n"
+        )
+        self.fakes.llm = {"models": ["claude-haiku-5-5"], "max_calls": 10, "max_usd": 0.5}
+        run = self.execute()
+        self.assertEqual(run.steps.ledger.state(), "run")
+        status = json.loads((self.lane("acme") / "project-status.json").read_text())
+        self.assertIn("credential-shaped", status["reason"])
+        self.assertFalse([c for c in self.fakes.calls if c[2] == "probe"], "nothing was sent")
+
+    def test_a_declared_budget_above_the_runs_company_budget_parks_the_project(self):
+        self.experiment(ASK + "json.dump({'x': ask(1)['value']['doubled']}, open(out, 'w'))\n")
+        self.fakes.llm = {"models": ["claude-haiku-5-5"], "max_calls": 10, "max_usd": 0.5}
+        config = routing.read(self.run / "routing.json")
+        recovery = {**config["recovery"], "company_usd": 0.4}
+        routing.write_json(self.run / "routing.json", {**config, "recovery": recovery})
+        self.execute()
+        status = json.loads((self.lane("acme") / "project-status.json").read_text())
+        self.assertEqual(status["reason"], "the spec's llm max_usd 0.5 is above this run's company budget ($0.4)")
+        self.assertFalse([c for c in self.fakes.calls if c[2] == "probe"])
+
+    def test_a_grant_refusal_inside_the_experiment_halts_instead_of_parking(self):
+        self.experiment(ASK + "answers = [ask(1), ask(2)]\njson.dump({'x': 1}, open(out, 'w'))\n")
+        self.fakes.llm = {"models": ["claude-haiku-5-5"], "max_calls": 10, "max_usd": 0.5}
+        ledger = grants.Ledger(self.run / "ledger.sqlite", json.loads((self.run / "grant.json").read_text()))
+        self.fakes.probe = lambda packet: ledger.control("stop") or {"doubled": 2}
+        self.execute()
+        self.assertFalse((self.lane("acme") / "project-status.json").exists())
+        self.assertNotIn(self.states()["acme"][0], pipeline.DONE)
+        self.assertIn("Paused: ", (self.run / "report.md").read_text())
 
     @unittest.skipUnless("ml-py314" in pipeline_steps.ENVIRONMENTS, "vetted ML environment not on this machine")
     def test_tests_run_in_every_environment_and_the_experiment_can_compare_them(self):
@@ -1927,11 +2498,31 @@ class Recovery(unittest.TestCase):
         self.assertEqual(pipeline_steps.size_problems(grown, spec), [])
 
     def test_the_company_cap_leaves_room_for_a_whole_round(self):
-        run = type("Run", (), {"budget_left": lambda self, cid: 1.4})()
+        run = type(
+            "Run",
+            (),
+            {"budget_left": lambda self, cid: 1.4, "round_estimate": lambda self, cid, limits: limits["round_usd"]},
+        )()
         limits = {"company_usd": 5.0, "round_usd": 1.5}
         self.assertTrue(pipeline.Pipeline.over_budget(run, "acme", limits, lambda m: None))
         run.budget_left = lambda cid: 1.6
         self.assertFalse(pipeline.Pipeline.over_budget(run, "acme", limits, lambda m: None))
+
+    def test_the_next_round_is_estimated_from_this_projects_own_measured_rounds(self):
+        rows = [
+            {"lane": "acme/json", "step": "repair-1", "charge": 60_000},
+            {"lane": "acme/json", "step": "repair-2", "charge": 280_000},
+            {"lane": "acme/json", "step": "review-final1", "charge": 210_000},
+            {"lane": "acme/json", "step": "repair-3", "charge": None},  # uncertain: held, counted in the budget
+            {"lane": "globex/json", "step": "repair-1", "charge": 900_000},
+        ]
+        self.assertAlmostEqual(pipeline.next_round(rows, "acme", 1.5), 0.98)
+        self.assertEqual(pipeline.next_round(rows[:2], "acme", 1.5), 1.5, "no recheck measured yet: the fixed one")
+        self.assertEqual(
+            pipeline.next_round([{**r, "charge": 900_000} for r in rows], "acme", 1.5),
+            1.5,
+            "never more than the fixed estimate",
+        )
 
     def test_survivors_leave_out_the_helpers_launchd_starts(self):
         listing = "  101   01:02 /usr/sbin/distnoted agent\n  202 00:05 /usr/bin/python3 -I runner.py\n"
@@ -2208,6 +2799,11 @@ class RealData(unittest.TestCase):
         self.assertTrue(any("read-only" in p for p in pipeline_steps.check_spec(spec)))
         self.assertTrue(pipeline_steps.check_spec({**spec, "package": "real_data", "data_paths": []}), "as the package")
 
+    def test_a_spec_may_never_let_builders_write_the_runners_results(self):
+        for path in ("results/*.jsonl", "results/llm-calls.jsonl", "results/*.json"):
+            spec = {"package": "calc", "spec_markdown": SPEC, "acceptance_tests": HIDDEN, "data_paths": [path]}
+            self.assertTrue(any("the runner's" in p for p in pipeline_steps.check_spec(spec)), path)
+
     def test_data_changed_after_download_is_caught(self):
         folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
         (folder / "real_data" / "rows").mkdir(parents=True)
@@ -2314,6 +2910,74 @@ class Metrics(unittest.TestCase):
         )
 
 
+class BrokerStops(unittest.TestCase):
+    """run_experiment's handling of a broker that stopped, with the sandbox job played by this process."""
+
+    def setUp(self):
+        root = signed_root(self)
+        scope = {"companies": ["Acme"], "company_ids": ["acme"], "operations": ["experiment"], "attempts_per_step": 1}
+        grant = grants.draft("build", scope, test_broker.MODELS, 1.0, 50, 1)
+        self.ledger = grants.Ledger(root / "ledger.sqlite", grant)
+        self.transcript = root / "llm-calls.jsonl"
+        self.pb = SimpleNamespace(manifest={"experiment_minutes": 1, "metrics": ["x"]}, arm=lambda name: root)
+        self.providers = test_broker.Providers()
+
+    def broker(self, replay=False):
+        declared = {"models": ["deepseek-flash"], "max_calls": 5, "max_usd": 1}
+        return broker.ExperimentBroker(
+            self.ledger,
+            "acme",
+            "spec",
+            declared,
+            test_broker.KEYS,
+            self.providers,
+            self.transcript,
+            replay,
+            budget_usd=5,
+        )
+
+    def test_a_new_recording_keeps_an_interrupted_one(self):
+        self.transcript.write_text('{"request_sha256": "a", "reply": {}}\n')
+        self.broker()
+        self.assertEqual(self.transcript.read_text(), "")
+        self.assertEqual(
+            self.transcript.with_name("llm-calls.1.jsonl").read_text(), '{"request_sha256": "a", "reply": {}}\n'
+        )
+        self.broker()
+        self.assertFalse(self.transcript.with_name("llm-calls.2.jsonl").exists(), "an empty one is not kept")
+
+    def stops_every_lane(self, model_broker, packet):
+        def job(pb, name, args, seconds, env, port, variables):
+            body = json.dumps(test_broker.call(packet=packet)).encode()
+            request = urllib.request.Request(
+                variables["ARCTURUS_LLM_URL"] + "/call",
+                body,
+                {"Authorization": "Bearer " + variables["ARCTURUS_LLM_TOKEN"]},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as refused:
+                urllib.request.urlopen(request, timeout=10)
+            refused.exception.close()
+            self.assertTrue(killed.wait(5), "the sandbox jobs are stopped at once, not at the time limit")
+            return {"exit": 1, "timed_out": False}
+
+        killed = threading.Event()
+        with (
+            patch.object(pipeline_steps, "run_job", job),
+            patch.object(sandbox, "stop", killed.set),
+            self.assertRaises(llm.SecurityStop),
+        ):
+            pipeline_steps.run_experiment(self.pb, None, model_broker)
+
+    def test_a_key_in_a_request_during_replay_stops_every_lane(self):
+        self.broker().forward(test_broker.call())
+        self.stops_every_lane(self.broker(replay=True), {"text": test_broker.KEYS["openai"]})
+        self.assertEqual(len(self.providers.sent), 1)
+
+    def test_a_key_in_an_answer_stops_every_lane(self):
+        self.providers.answer = {"act": "dismiss", "summary": test_broker.KEYS["deepseek"]}
+        self.stops_every_lane(self.broker(), {"text": "hello"})
+
+
 class Specs(unittest.TestCase):
     def test_acceptance_tests_must_define_unittest_methods(self):
         spec = {
@@ -2354,6 +3018,34 @@ class Specs(unittest.TestCase):
         ]
         problems = pipeline_steps.check_spec({**spec, "spec_markdown": "s", "acceptance_tests": tests})
         self.assertEqual(problems, ["62 new or changed hidden acceptance tests; keep at most 60 (one build)"])
+
+    def test_model_access_is_for_a_capped_experiment_only(self):
+        spec = {
+            "package": "calc",
+            "spec_markdown": "s",
+            "acceptance_tests": HIDDEN,
+            "data_paths": [],
+            "experiment_minutes": 5,
+            "metrics": ["x"],
+        }
+        llm = {"models": ["deepseek-flash"], "max_calls": 20, "max_usd": 0.3}
+        self.assertEqual(pipeline_steps.check_spec(spec), [], "a spec without llm has no model access")
+        self.assertEqual(pipeline_steps.check_spec({**spec, "llm": llm}), [])
+        for bad in (
+            {**spec, "experiment_minutes": 0, "metrics": [], "llm": llm},
+            {**spec, "llm": {**llm, "max_calls": 0}},
+            {**spec, "llm": {**llm, "max_usd": 0}},
+            {**spec, "llm": {**llm, "max_usd": 5.01}},
+        ):
+            self.assertTrue(pipeline_steps.check_spec(bad), bad)
+        schema = pipeline_steps.SCHEMAS["spec"]["properties"]["llm"]
+        self.assertTrue(shape(llm, schema))
+        for bad in ({**llm, "max_calls": 501}, {**llm, "models": ["claude-opus-5-5"]}, {**llm, "max_usd": "0.3"}):
+            self.assertFalse(shape(bad, schema), bad)
+        base = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        manifest = pipeline_steps.materialize(base, {"id": "acme", "name": "Acme"}, {**spec, "llm": llm}, {}, 1)
+        self.assertEqual(manifest["llm"], llm)
+        self.assertIn("ARCTURUS_LLM_URL + '/call'", (base / "SPEC.md").read_text(), "builders learn the protocol")
 
     def test_a_spec_may_add_data_folders_but_never_code_or_tests(self):
         spec = {"package": "calc", "spec_markdown": "s", "acceptance_tests": HIDDEN, "data_paths": ["tasks/*.json"]}

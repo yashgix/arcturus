@@ -41,7 +41,8 @@ SIGNATURES = operator_approval.SIGNERS.parent
 PRINCIPAL = "arcturus-operator"
 LIMITS = {
     "research": "No builds, sends or publication.",
-    "build": "Local builds in sandboxed workspaces only. No pushes, sends or publication.",
+    "build": "Local builds in sandboxed workspaces only. Experiments a spec declares may call only the "
+    "models listed above, through the local broker. No pushes, sends or publication.",
     "evaluate": "Model calls for one sandboxed evaluation through the local broker only. No builds, sends or "
     "publication.",
 }

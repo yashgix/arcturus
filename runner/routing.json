@@ -8,6 +8,7 @@
     "attempts": 4,
     "medium_repairs": 1,
     "respecs": 1,
+    "checks": 1,
     "company_usd": 5.0,
     "round_usd": 1.5
   },
@@ -64,6 +65,11 @@
       "claude-sonnet-5-5",
       "gpt-6-sol"
     ],
+    "consistency": [
+      "deepseek-v4-pro",
+      "claude-haiku-5-5",
+      "gpt-6-luna"
+    ],
     "plan": [
       "deepseek-flash",
       "claude-sonnet-5-5",
@@ -77,6 +83,11 @@
     ],
     "review": [
       "claude-haiku-5-5",
+      "gpt-6-luna"
+    ],
+    "experiment": [
+      "claude-haiku-5-5",
+      "deepseek-flash",
       "gpt-6-luna"
     ],
     "final_review": [

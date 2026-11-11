@@ -3,18 +3,21 @@ Every step checkpoints its answer in the company's lane, so a restart continues 
 through the one pipeline grant; Max calls go through subscriptions.py and cost nothing extra."""
 
 import ast
+from collections import Counter
 from fnmatch import fnmatch
 import hashlib
 import io
 import json
 import math
 from pathlib import Path
+import posixpath
 import re
 import shutil
 import subprocess
 import tarfile
 import time
 
+import broker
 import build
 import contacts
 import dossier
@@ -36,8 +39,15 @@ from workflow import Workflow
 PYTHON = environments.PYTHON
 ENVIRONMENTS = environments.available()
 MAX_EXPERIMENT_MINUTES = 60
+EXPERIMENT_MODELS = read(Path(__file__).with_name("routing.json"))["steps"]["experiment"]
+MAX_LLM_CALLS = 500
+MAX_LLM_USD = 5
+NO_LLM = {"models": [], "max_calls": 0, "max_usd": 0}
+LLM_CALLS = build.RECORDING
 RESULT_DOCS = ("README.md", "docs/*.md")
 MAX_METRICS_BYTES = 65_536
+MAX_DOC_BYTES = 400_000
+INTERVIEW = "docs/INTERVIEW.md"  # written by the runner from the notes step
 METRIC_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 # The candidate's own resumes (read-only) and the bank of their exact bullets built from them. Both
 # are copied into the run folder when its grant is drafted: launchd jobs may not be allowed to read every folder.
@@ -75,11 +85,46 @@ IN_MEMORY = (
     "only behind an explicit demo flag such as --serve, and the README says plainly that real socket and "
     "process behavior is not exercised by the tests."
 )
+WEB_PATHS = ("web/*.ts", "web/*.tsx", "web/*.test.cjs", "web/tsconfig.json")
+TYPESCRIPT = (
+    "In an environment with Node, the TypeScript and React code lives in web/ (*.ts, *.tsx, tsconfig.json "
+    "with strict on; node test files as web/*.test.cjs in plain JavaScript); never write package.json or "
+    "install anything: node_modules at the repository root is the environment's read-only packages, "
+    "linked by the runner. Tests, own and hidden, stay Python unittest: they run tsc "
+    "(ARCTURUS_NODE_MODULES/typescript/bin/tsc) and node --test only through subprocess with ARCTURUS_NODE, "
+    "write compiled output to a temporary folder, and render components with react-dom/server; a hidden "
+    "test imports the package or runs Node. There is no browser, bundler or server."
+)
 # One night's build, measured on the pilot: the first project (22k-character spec, 44 hidden tests, 3,006 lines) finished;
 # the second (41-60k, 81-110 tests, 6,305 lines) could not be repaired in one answer.
 SIZE = (
     "Size this milestone for one build: about 1,500-3,000 lines in total including tests, a specification under "
     "30,000 characters and at most 60 hidden acceptance tests. Later milestones extend the same code."
+)
+# How experiment.py reaches the broker: spec writers read it, and builders in the spec's runtime section.
+LLM_ACCESS = (
+    "Only experiment.py's run reaches the models, never tests, the demo or builders: it reads ARCTURUS_LLM_URL and "
+    "ARCTURUS_LLM_TOKEN from its environment and, with plain urllib, POSTs JSON {model, system, input, schema} to "
+    "ARCTURUS_LLM_URL + '/call' with the header 'Authorization: Bearer <token>'. input is a JSON object (the user "
+    "message); schema is the answer's JSON Schema of type object, at most 20 KB, built only from objects (every "
+    "property required, additionalProperties false), arrays with minItems and maxItems, integers with minimum and "
+    "maximum, numbers, and strings with minLength and maxLength or an enum. The answer is {kind, value, "
+    "input_tokens, output_tokens, cost_microusd}; value is the parsed answer only when kind is ok, and an answer "
+    f"has at most {broker.EXPERIMENT_OUTPUT:,} output tokens. Each request is one call (no retries by the runner), "
+    "sent one at a time and counted against max_calls and max_usd across every run of the spec; a request sent "
+    "while another is open, or any malformed request, ends the session. Run 1 is live and recorded, run 2 answers "
+    "each request from the recording by its exact content (each recorded answer once), so the experiment sends the "
+    f"same requests (no times or random values in them); the runner commits the recording as {LLM_CALLS}. "
+    "Tests replace the client with an in-process fake."
+)
+GENERATED_DOCS = (
+    "If README.md or a docs/ file holds results the project renders itself from "
+    "results/metrics.json (a deterministic generator, for example a results table), list it in "
+    "generated_docs: the doc's path and the python arguments that render it, reading the current doc "
+    "from the repository and writing the whole rendered doc to {out} (for example [\"demo.py\", "
+    "\"--readme\", \"README.md\", \"--out\", \"{out}\"]). After the experiment the runner runs it "
+    "offline and commits the output, so nobody types those numbers by hand. Otherwise generated_docs "
+    "is empty."
 )
 EXPERIMENT = (
     "Projects whose result needs real computation (training, simulation, benchmarks) set experiment_minutes "
@@ -91,7 +136,9 @@ EXPERIMENT = (
     "after the final review, requires identical metrics, has the results checked independently and "
     "commits them as results/metrics.json; README and docs cite that file and never state numbers or "
     "conclusions it does not support. Tests use small, fast configurations of the same code. Otherwise "
-    "experiment_minutes is 0 and metrics is empty."
+    "experiment_minutes is 0 and metrics is empty. An experiment that needs real language-model answers "
+    f"sets llm: models (from {', '.join(EXPERIMENT_MODELS)}), max_calls (1-{MAX_LLM_CALLS}) and max_usd "
+    f"(above 0, at most {MAX_LLM_USD}); otherwise llm has no models and both caps 0. " + LLM_ACCESS
 )
 
 
@@ -101,7 +148,17 @@ def runner_can():
         "Offline Python in one of these vetted environments: "
         + "; ".join(f"{k}: {v['about']}" for k, v in ENVIRONMENTS.items())
         + f". Unit tests up to 5 minutes; a separate experiment run up to {MAX_EXPERIMENT_MINUTES} minutes. "
-        "No network, no package installs, no sockets or services in tests. Builders write Python only. Public "
+        "No network, no package installs, no sockets or services in tests. Builders write Python, and in an "
+        "environment with Node also TypeScript and React (compiled with tsc, tested by Python tests that run "
+        "node --test and render components with react-dom/server; no browser bundle). An "
+        "experiment may call these language models through the runner's local broker: "
+        + ", ".join(EXPERIMENT_MODELS)
+        + "; declared in the spec, capped in calls and dollars, recorded in its "
+        "first run and replayed in its second. Every call is structured output: it sends a JSON Schema (an "
+        "object) with the request, which Claude and OpenAI models get through their native JSON-schema output "
+        "modes and DeepSeek in its instructions; the runner checks each answer against the schema and returns "
+        "its kind (ok, invalid, truncated, refused, ...), so an experiment can measure schema conformance. "
+        "Tests, the demo and builders get no model access. Public "
         "data (datasets, documents, postings) is not a runner requirement: before the spec, the runner's data "
         "step finds it on GitHub, Hugging Face and Zenodo, or takes files the operator pinned, checks the "
         "license and places it read-only in real_data/."
@@ -175,10 +232,15 @@ TASKS = {
         "results; the experiment runs in the main one with every listed environment readable. "
         + EXPERIMENT
         + " "
+        + GENERATED_DOCS
+        + " "
         + REAL_DATA
-        + " The repository has the "
-        "package, tests/ with unittest tests, README.md (what it is, why it matters for this company, how to run "
-        "it, results, and that it was developed with Arcturus, Yash's multi-agent system), docs/DESIGN.md "
+        + " "
+        + TYPESCRIPT
+        + " The repository has the package (or web/ in an "
+        "environment with Node), tests/ with unittest tests, README.md (what it is, why it matters for this company, "
+        "how to run it, results, "
+        "and that it was developed with Arcturus, Yash's multi-agent system), docs/DESIGN.md "
         "(architecture, tradeoffs, limits) and demo.py (runs the main scenario end to end and prints a readable "
         "result). Write precise, testable requirements with exact function names, signatures, inputs, outputs and "
         "edge cases. Then write 2-4 hidden acceptance test files (unittest, file names test_p_*.py) that check "
@@ -206,7 +268,7 @@ TASKS = {
         + " List in data_paths every data file pattern the project needs beyond the package, tests, README, docs "
         "and demo. Return the whole revised specification and its hidden acceptance tests. A hidden test changes "
         "only where why_revise shows from the specification's own words that the test contradicts it; keep every "
-        "other test exactly. " + REAL_DATA + " " + SIZE
+        "other test exactly. " + GENERATED_DOCS + " " + REAL_DATA + " " + SIZE
     ),
     "final_review": (
         "Independently review this implementation against the specification, section by section, as the last gate "
@@ -277,14 +339,30 @@ TASKS["results_review"] = (
     "the setup supports the claim (seeds, held-out evaluation, baselines, enough runs or seeds, no leakage between "
     "training and evaluation), and that every number and conclusion in README.md and docs/ follows from these "
     "metrics. A number that differs from metrics, a conclusion they do not support or a missing essential caveat "
-    "is high, category docs, cause code, with that document's path. A metric computed wrongly or a setup that "
-    "cannot support the claim is high, category correctness, with the path of the code at fault. Otherwise approve."
+    "is high, category docs, cause code, with the path of the document that states it, never the code's path. A "
+    "metric computed wrongly or a setup that cannot support the claim is high, category correctness, with the path "
+    "of the code at fault. When llm_calls is given, the experiment called language models: run 1 live and "
+    "recorded in " + LLM_CALLS + ", run 2 replayed "
+    "from that recording. Then numbers must come from the recorded run, the README must name the models and the "
+    "number of calls, and observed model behaviour claimed as a guarantee is high, category docs. The replay "
+    "shows only that the metrics follow deterministically from the recorded answers; a claim that live model "
+    "outputs reproduce, or that new runs would give the same numbers, is high, category docs. Otherwise approve."
 )
 TASKS["data_search"] = (
     "Name up to three short keyword searches (2-5 words, no operators) that would find the real public datasets, "
     "benchmarks, open-source code or documents this project should use; each runs on the dataset search of Hugging "
     "Face, the repository search of GitHub and the record search of Zenodo. real_data names the decision's "
     "candidates."
+)
+TASKS["consistency"] = (
+    "Before anything is built, check this specification and its hidden acceptance tests for contradictions: two "
+    "requirements no implementation can meet at once, or a hidden test that expects what the specification's own "
+    "words rule out, or a file the specification requires that builders_may_write_only does not match (glob "
+    "patterns; * spans folders). Judge with the exact behavior of the pinned packages in environments (for example "
+    "how a parser reads a written value back). Report only certain contradictions, never style, missing detail, "
+    "ambiguity or a design you would choose differently. For each, quote the two conflicting passages exactly as "
+    "written in spec_markdown or a test file, name the files in where, give in example a concrete input on which "
+    "both cannot hold, and say why. None: an empty list."
 )
 TASKS["data"] = (
     "Choose real public data for this project from the captured pages only. For each source give a short name, the "
@@ -335,9 +413,15 @@ SCHEMAS = {
         also_test_in=array(choice(list(ENVIRONMENTS)), 3),
         experiment_minutes={"type": "integer", "minimum": 0, "maximum": MAX_EXPERIMENT_MINUTES},
         metrics=array(text(64), 100),
+        llm=obj(
+            models=array(choice(EXPERIMENT_MODELS), len(EXPERIMENT_MODELS)),
+            max_calls={"type": "integer", "minimum": 0, "maximum": MAX_LLM_CALLS},
+            max_usd={"type": "number"},
+        ),
         spec_markdown=text(60_000),
         acceptance_tests=array(obj(name=text(80), text=text(30_000)), 8, 2),
         data_paths=array(text(80), 8),
+        generated_docs=array(obj(path=text(80), command=array(text(120), 8, 1)), 2),
     ),
     "packet": obj(
         base_resume=text(120),
@@ -386,6 +470,9 @@ SCHEMAS = {
     ),
 }
 SCHEMAS["recheck"] = SCHEMAS["final_review"]
+SCHEMAS["consistency"] = obj(
+    contradictions=array(obj(first=text(600), second=text(600), where=text(200), example=text(800), why=text(1000)), 6)
+)
 SCHEMAS["data_search"] = obj(queries=array(text(200), 3, 1))
 SCHEMAS["data"] = obj(
     sources=array(
@@ -411,7 +498,8 @@ DAY = 86_400
 TEST_NAME = re.compile(r"test_p_[a-z0-9_]{1,40}\.py")
 PACKAGE = re.compile(r"[a-z][a-z0-9_]{1,30}")
 # Extra paths a spec may ask for: data files in plain folders, never code, tests or anything Python would import.
-DATA_PATH = re.compile(r"(?:[a-z0-9_-]+/){1,3}[a-z0-9_*-]+\.(?:json|jsonl|csv|txt|md|sql)")
+DATA_FILES = ("json", "jsonl", "csv", "txt", "md", "sql", "yaml", "yml")
+DATA_PATH = re.compile(r"(?:[a-z0-9_-]+/){1,3}[a-z0-9_*-]+\.(?:" + "|".join(DATA_FILES) + r")")
 STANDARD_PATHS = ("tests/*.py", "README.md", "docs/*.md", "demo.py", "examples/*.json", "experiment.py")
 RESEARCH_STEPS = ("extract", "dossier", "projects", "challenge")
 # The ledger's and gate's refusals: the grant, not the model or the work, stopped the step.
@@ -518,7 +606,7 @@ def size_problems(value, previous=None):
     return problems
 
 
-def test_problems(item, package):
+def test_problems(item, package, node=False):
     if not TEST_NAME.fullmatch(item["name"]):
         return [f"{item['name']}: file names must look like test_p_name.py"]
     try:
@@ -530,26 +618,30 @@ def test_problems(item, package):
     imports |= {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     if not tests:
         return [f"{item['name']}: no unittest test methods in a top-level TestCase class"]
-    if package not in imports:
-        return [f"{item['name']}: never imports the package {package}"]
+    if package not in imports and not (node and "ARCTURUS_NODE" in item["text"]):
+        return [f"{item['name']}: never imports the package {package}" + (" or runs Node" if node else "")]
     return []
 
 
 def check_spec(value, previous=None):
     if not PACKAGE.fullmatch(value["package"]) or value["package"] == real_data.FOLDER:
         return [f"package must be a short lowercase Python identifier other than {real_data.FOLDER}"]
-    problems = [p for item in value["acceptance_tests"] for p in test_problems(item, value["package"])]
+    node = bool(node_modules(value))
+    problems = [p for item in value["acceptance_tests"] for p in test_problems(item, value["package"], node)]
     names = [item["name"] for item in value["acceptance_tests"]]
     if SECRET.search(value["spec_markdown"]):
         problems.append("write credential placeholders as prose (NAME set to the key), never NAME=value")
     if "## Company evidence" in value["spec_markdown"]:
         problems.append("leave out the Company evidence section: Arcturus appends the sourced one")
     problems += [
-        f"data path {p} must be a data file in a folder, like tasks/*.json (real_data/ is read-only)"
+        f"data path {p} must be a data file in a folder, like tasks/*.json (real_data/ is read-only, "
+        "results/ the runner's)"
         for p in value.get("data_paths", [])
-        if not DATA_PATH.fullmatch(p) or p.startswith(("tests/", real_data.FOLDER + "/"))
+        if not DATA_PATH.fullmatch(p) or p.startswith(("tests/", "results/", real_data.FOLDER + "/"))
     ]
-    problems += size_problems(value, previous) + metric_problems(value)
+    problems += (
+        size_problems(value, previous) + metric_problems(value) + generated_docs_problems(value) + llm_problems(value)
+    )
     others = value.get("also_test_in", [])
     if value.get("environment", "stdlib") in others or len(set(others)) < len(others):
         problems.append("also_test_in lists other environments than the main one, each once")
@@ -561,6 +653,107 @@ def check_spec(value, previous=None):
     return problems + (["acceptance test names must be distinct"] if len(set(names)) < len(names) else [])
 
 
+def consistency_step(spec):
+    """A new step name for every spec version, so a revised spec is checked again."""
+    body = json.dumps([spec["spec_markdown"], spec["acceptance_tests"], TASKS["consistency"]])
+    return "consistency-" + hashlib.sha256(body.encode()).hexdigest()[:12]
+
+
+def flat(words):
+    return " ".join(words.split())
+
+
+def check_consistency(value, spec):
+    """Each quoted passage must be in the spec or a hidden test as written, or the contradiction is not shown."""
+    sources = [flat(spec["spec_markdown"]), *(flat(t["text"]) for t in spec["acceptance_tests"])]
+    return [
+        f"quote exactly, as written in the spec or a test: {q[:80]!r}"
+        for c in value["contradictions"]
+        for q in (c["first"], c["second"])
+        if not any(flat(q) in s for s in sources)
+    ]
+
+
+def contradictions(found, spec):
+    """The evidence for a revision: each contradiction with the hidden test files that hold its quotes."""
+    lines = []
+    for c in found:
+        files = [
+            t["name"]
+            for t in spec["acceptance_tests"]
+            if any(flat(q) in flat(t["text"]) for q in (c["first"], c["second"]))
+        ]
+        lines.append(
+            f"spec check: {c['first']!r} contradicts {c['second']!r}"
+            + (f" ({', '.join(files)})" if files else "")
+            + f": {c['why']} Example: {c['example']}"
+        )
+    return " | ".join(lines)[:1500]
+
+
+def allowed_paths(spec):
+    """What builders and repairs may write: the package's code and the data files it ships, the standard files,
+    TypeScript in an environment with Node, and the spec's data paths."""
+    package = spec["package"]
+    return [
+        f"{package}/*.py",
+        *(f"{package}/*.{e}" for e in DATA_FILES),
+        *STANDARD_PATHS,
+        *(WEB_PATHS if node_modules(spec) else ()),
+        *spec.get("data_paths", []),
+    ]
+
+
+def node_modules(spec):
+    """The read-only packages of the spec's environment when it has Node, else None."""
+    return ENVIRONMENTS.get(spec.get("environment", "stdlib"), {}).get("env", {}).get("ARCTURUS_NODE_MODULES")
+
+
+def link_node_modules(base, arm, modules):
+    """The environment's read-only packages at the repository root, where tsc and node resolve imports; kept out
+    of git like real_data/."""
+    link = Path(base) / "repo" / "node_modules"
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(modules)
+    real_data.exclude(arm, "/node_modules")
+
+
+def generated_docs_problems(value):
+    """A generator renders one result doc after the experiment: a project script, with {out} once."""
+    items = value.get("generated_docs", [])
+    if items and not value.get("experiment_minutes"):
+        return ["generated_docs render experiment results: list them only with an experiment"]
+    return [
+        f"generated_docs {item['path']}: README.md or a docs/*.md path other than {INTERVIEW}, a project script "
+        "(not tests/) as the first argument and {out} exactly once"
+        for item in items
+        if posixpath.normpath(item["path"]) != item["path"]
+        or item["path"] == INTERVIEW
+        or not any(fnmatch(item["path"], g) for g in RESULT_DOCS)
+        or not item["command"][0].endswith(".py")
+        or item["command"][0].startswith(("tests/", "/"))
+        or ".." in item["command"][0]
+        or sum(a.count("{out}") for a in item["command"]) != 1
+    ]
+
+
+def render_docs(pb, env):
+    """The spec's generated docs, rendered by the project's own generator in the sandbox and committed by the
+    runner (what it prints is the project's code; the results review checks it); a problem when a generator fails."""
+    rendered = []
+    for n, item in enumerate(pb.manifest.get("generated_docs", [])):
+        out = pb.arm("json") / f"docs-{n}" / "rendered.md"
+        result = run_job(pb, f"docs-{n}", [a.replace("{out}", str(out)) for a in item["command"]], 120, env)
+        text = None if result["exit"] or result["timed_out"] else sandbox.read_job_file(out, MAX_DOC_BYTES)
+        if text is None:
+            return f"the docs generator for {item['path']} failed (exit {result['exit']}, or no output at {{out}})"
+        rendered.append({"path": item["path"], "text": text})
+    if rendered:
+        pb.write_files("json", {"files": rendered}, "Generated docs, rendered by the runner")
+    return None
+
+
 def metric_problems(value):
     names, minutes = value.get("metrics", []), value.get("experiment_minutes", 0)
     if bool(names) != bool(minutes):
@@ -570,6 +763,17 @@ def metric_problems(value):
         for n in names
         if not METRIC_NAME.fullmatch(n) or names.count(n) > 1
     ]
+
+
+def llm_problems(value):
+    declared = value.get("llm", NO_LLM)
+    if not declared["models"]:
+        return []
+    if not value.get("experiment_minutes"):
+        return ["llm models are for the experiment only: set experiment_minutes or leave llm models empty"]
+    if declared["max_calls"] < 1 or not 0 < declared["max_usd"] <= MAX_LLM_USD:
+        return [f"with llm models, max_calls is 1-{MAX_LLM_CALLS} and max_usd above 0 and at most {MAX_LLM_USD}"]
+    return []
 
 
 def kept_tests(previous, value, fixable):
@@ -815,6 +1019,29 @@ class Steps(NoteLog, Workflow):
             write_json(lane / "test-changes.json", changes)
         return value
 
+    def consistency(self, company, spec):
+        """Contradictions in the spec and its hidden tests, found before any build. A grant drafted before this
+        check existed does not cover it, and no answer is no evidence: the build goes ahead, noted."""
+        if "consistency" not in self.grant["scope"]["operations"]:
+            self.note(company, "pipeline", "spec check skipped: not in this grant")
+            return []
+        packet = {
+            "spec_markdown": spec["spec_markdown"],
+            "acceptance_tests": spec["acceptance_tests"],
+            "environments": {
+                n: ENVIRONMENTS[n]["about"] for n in (spec.get("environment", "stdlib"), *spec.get("also_test_in", []))
+            },
+            "builders_may_write_only": allowed_paths(spec),
+            "task": TASKS["consistency"],
+        }
+        value = self.ask(
+            company, consistency_step(spec), packet, SCHEMAS["consistency"], lambda v: check_consistency(v, spec)
+        )
+        if value is None:
+            self.note(company, "pipeline", "spec check: no model answered; building without it")
+            return []
+        return value["contradictions"]
+
     def first_spec(self, company, decision, real_data=()):
         routed = self.lane(company, "routed")
         idea = chosen_idea(routed, decision)
@@ -984,6 +1211,8 @@ def runtime_section(spec):
         if minutes
         else ""
     )
+    if models := spec.get("llm", NO_LLM)["models"]:
+        run += f" The experiment may call {', '.join(models)}. " + LLM_ACCESS
     return "\n\n## Runtime (set by the runner)\n\n" + "\n".join(lines) + "\n" + (tests + run).strip() + "\n"
 
 
@@ -1000,24 +1229,28 @@ def materialize(base, company, spec, keys, repairs, keep_code=False, evidence=()
     package, name = spec["package"], spec.get("environment", "stdlib")
     env, minutes = ENVIRONMENTS[name], spec.get("experiment_minutes", 0)
     tested = [{"name": n, **ENVIRONMENTS[n]} for n in (name, *spec.get("also_test_in", []))]
+    modules = node_modules(spec)
     return {
         "company": {"id": company["id"], "name": company["name"]},
         "spec": str(base / "SPEC.md"),
         "base": str(base),
-        "allowed": [f"{package}/*.py", *STANDARD_PATHS, *spec.get("data_paths", [])],
+        "allowed": allowed_paths(spec),
         "required": [
-            f"{package}/__init__.py",
+            "web/tsconfig.json" if modules else f"{package}/__init__.py",
             "README.md",
             "docs/DESIGN.md",
             "demo.py",
             *(["experiment.py"] if minutes else []),
         ],
+        "node_modules": modules,
         "protected": {"dir": str(protected), "pattern": "test_p_*.py", "sha256": digests},
         "python": env["python"],
         "read": env["read"],
         "env": env["env"],
         "test_environments": tested,
         "experiment_minutes": minutes,
+        "llm": spec.get("llm", NO_LLM),
+        "generated_docs": spec.get("generated_docs", []),
         "metrics": spec.get("metrics", []),
         "repairs": repairs,
         "arms": {"json": {"workspace": str(base / "repo")}},
@@ -1048,6 +1281,11 @@ class ProjectBuild(NoteLog, build.Build):
         self.company = manifest["company"]
         self.spec = Path(manifest["spec"]).read_text()
         self.hidden = build.test_ids(manifest["protected"]["dir"], manifest["protected"]["pattern"])
+        if manifest.get("node_modules"):
+            self.system = build.SYSTEM.replace("Python engineer", "Python and TypeScript engineer") + (
+                " TypeScript and React go in web/ with strict types and function components, using only the "
+                "environment's packages."
+            )
 
     def arm(self, name):
         return Path(self.manifest["base"]) / "arms" / name
@@ -1304,12 +1542,19 @@ def plus_review(pb, router, step, packet):
     return value
 
 
-def results_review(pb, router, metrics, n):
-    """A focused, independent check of the experiment's results and the claims made from them. The step name holds
-    a fingerprint of spec, code and metrics, so a saved review is reused only for the evidence it judged."""
-    evidence = json.dumps([pb.spec, head(pb), metrics], sort_keys=True).encode()
+def results_review(pb, router, metrics, n, calls=None):
+    """A focused, independent check of the experiment's results and the claims made from them, with a summary of
+    its recorded model calls if it made any. The step name holds a fingerprint of spec, code and metrics, so a
+    saved review is reused only for the evidence it judged."""
+    evidence = json.dumps([pb.spec, head(pb), metrics, calls], sort_keys=True).encode()
     step = f"review-results-{n}-{hashlib.sha256(evidence).hexdigest()[:12]}"
-    packet = {"task": TASKS["results_review"], "specification": pb.spec, "files": pb.files("json"), "metrics": metrics}
+    packet = {
+        "task": TASKS["results_review"],
+        "specification": pb.spec,
+        "files": pb.files("json"),
+        "metrics": metrics,
+        **({"llm_calls": calls} if calls else {}),
+    }
     review, model = saved_review(pb, step)
     if review is None:
         review, model = first_review(pb, router, step, packet)
@@ -1320,8 +1565,9 @@ def results_review(pb, router, metrics, n):
 
 
 def docs_only(review):
-    """Every blocking finding is about README or docs: a wording repair can fix it without touching code."""
-    return all(any(fnmatch(f["path"], g) for g in RESULT_DOCS) for f in blocking(review))
+    """Every blocking finding is about README or docs (by its path or its category): a wording repair can fix it
+    without touching code, and the repair may change only those files."""
+    return all(f["category"] == "docs" or any(fnmatch(f["path"], g) for g in RESULT_DOCS) for f in blocking(review))
 
 
 def blocking(review):
@@ -1368,6 +1614,13 @@ def review_notes(result, commit):
 
 def count(results):
     return f"{results['passed']}/{results['total']} pass"
+
+
+def files_digest(pb):
+    """The committed files, except the review notes, which name the reviewed commit and so change on every retry."""
+    listing = build.git(pb.arm("json"), pb.workspace("json"), "ls-tree", "-r", "HEAD").splitlines()
+    kept = [line for line in listing if not line.endswith("\tdocs/REVIEW.md")]
+    return hashlib.sha256("\n".join(kept).encode()).hexdigest()
 
 
 def record_acceptance(pb, result):
@@ -1418,9 +1671,10 @@ def revert(pb, commit, message):
     pb.commit("json", message)
 
 
-def run_job(pb, name, args, seconds, env=None):
+def run_job(pb, name, args, seconds, env=None, port=None, variables=None):
     """Run one of the project's scripts in the sandbox, in a test environment (the first by default), writing only
-    to a fresh scratch folder; its output stays local evidence, never sent to a model."""
+    to a fresh scratch folder; its output stays local evidence, never sent to a model. Only the experiment's run
+    gets a broker: its one port and variables."""
     env = env or pb.test_environments()[0]
     workspace, arm = pb.workspace("json"), pb.arm("json")
     scratch = arm / name
@@ -1428,6 +1682,7 @@ def run_job(pb, name, args, seconds, env=None):
     scratch.mkdir(parents=True)
     variables = {
         **env["env"],
+        **(variables or {}),
         "ARCTURUS_ENVIRONMENT": env["name"],
         "PATH": "/usr/bin:/bin",
         "HOME": str(scratch),
@@ -1445,6 +1700,7 @@ def run_job(pb, name, args, seconds, env=None):
         seconds,
         out,
         arm / f"{name}-errors.txt",
+        port=port,
         deny_read=list(pb.manifest["keys"].values()),
     )
     return {"exit": code, "timed_out": timed_out, "output": str(out)}
@@ -1484,16 +1740,81 @@ def experiment_environment(pb):
     }
 
 
-def run_experiment(pb, env):
-    """experiment.py in the sandbox, within the spec's time limit: (metrics, problems)."""
+def run_experiment(pb, env, model_broker=None):
+    """experiment.py in the sandbox, within the spec's time limit: (metrics, problems). A broker stopped by a
+    refusal or left with a call unfinished fails the run."""
     minutes = pb.manifest["experiment_minutes"]
     metrics = pb.arm("json") / "experiment" / "metrics.json"
-    result = run_job(pb, "experiment", ["experiment.py", "--out", str(metrics)], minutes * 60, env)
+    args = ["experiment.py", "--out", str(metrics)]
+    if model_broker is None:
+        result = run_job(pb, "experiment", args, minutes * 60, env)
+    else:
+        model_broker.on_security_stop = sandbox.stop  # every lane is stopping: end every job now
+        port = model_broker.start()
+        try:
+            result = run_job(
+                pb,
+                "experiment",
+                args,
+                minutes * 60,
+                env,
+                port,
+                {"ARCTURUS_LLM_URL": f"http://127.0.0.1:{port}", "ARCTURUS_LLM_TOKEN": model_broker.token},
+            )
+        finally:
+            model_broker.stop()
+        if model_broker.security_stop:  # credential handling can't be trusted: every lane stops, as everywhere else
+            raise llm.SecurityStop(model_broker.stopped)
+        refused_by_grant(model_broker.stopped)  # the grant, not the project, stopped it: pause, never park
+        if model_broker.stopped or model_broker.unfinished:
+            return None, [f"model broker stopped: {model_broker.stopped or 'a call did not finish'}"[:300]]
     if result["timed_out"]:
         return None, [f"experiment.py ran past {minutes} minutes"]
     if result["exit"]:
         return None, [f"experiment.py exit {result['exit']}"]
     return check_metrics(sandbox.read_job_file(metrics, MAX_METRICS_BYTES), pb.manifest["metrics"])
+
+
+def experiment_broker(pb, replay, budget_usd=0):
+    """The model broker for one experiment run, None without declared models: the first run records live calls in
+    the lane, outside the workspace; the second replays them. A revised spec gets its own caps."""
+    declared = pb.manifest["llm"]
+    if not declared["models"]:
+        return None
+    keys = {provider: pb.key(provider) for provider in pb.manifest["keys"]}
+    return broker.ExperimentBroker(
+        pb.ledger,
+        pb.company["id"],
+        experiment_fingerprint(pb),
+        declared,
+        keys,
+        pb.connection,
+        recorded_calls(pb),
+        replay,
+        budget_usd,
+    )
+
+
+def experiment_fingerprint(pb):
+    return hashlib.sha256(json.dumps([pb.manifest["llm"], pb.spec], sort_keys=True).encode()).hexdigest()[:12]
+
+
+def recorded_calls(pb):
+    return pb.lane(pb.company, "json") / "llm-calls.jsonl"
+
+
+def call_summary(pb):
+    """What the results check sees of the recorded calls: how many, which models, their known cost, the reserve
+    uncertain calls still hold, and the answer kinds."""
+    rows = [json.loads(line) for line in recorded_calls(pb).read_text().splitlines()]
+    replies = [row["reply"] for row in rows]
+    return {
+        "calls": len(rows),
+        "models": sorted({row["request"]["model"] for row in rows}),
+        "cost_usd": sum(r["cost_microusd"] for r in replies) / 1_000_000,
+        "held_usd": sum(row["held_microusd"] for row in rows) / 1_000_000,
+        "kinds": dict(sorted(Counter(r["kind"] for r in replies).items())),
+    }
 
 
 def number(value):
