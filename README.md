@@ -18,13 +18,15 @@ work and recovers from failures. **Arcturus should adapt to the task, not the ta
 
 - **Build.** Turns a written spec into working, tested software. Models write the code, the code runs in a sandbox
   against hidden acceptance tests the builder never sees, an independent model reviews it, and failures get
-  targeted repairs.
+  targeted repairs. Projects run in vetted, hash-pinned environments: web APIs (FastAPI), browser tests (Playwright),
+  scientific Python and reproducible experiments.
 - **Research.** Produces source-backed research: captures the sources, checks every quote against them, cites each
   finding, and has a second model challenge the conclusions.
 - **Evaluate.** Benchmarks AI agents in a sandbox. Every model call goes through a broker, and a verifier replays the
   run and must reproduce the report byte for byte.
 - **Pipeline.** Chains all three into a continuous queue that runs unattended: it finds companies, researches each
-  one, decides which project would matter to it, writes the spec, builds and reviews the project, and drafts the
+  one, decides which project would matter to it in that company's own stack, finds real public data for it on
+  GitHub, Hugging Face and Zenodo, writes the spec, builds and reviews the project in milestones, and drafts the
   notes and outreach, for several companies in parallel.
 
 ## What makes it work

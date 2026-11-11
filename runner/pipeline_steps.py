@@ -3,16 +3,22 @@ Every step checkpoints its answer in the company's lane, so a restart continues 
 through the one pipeline grant; Max calls go through subscriptions.py and cost nothing extra."""
 
 import ast
+from fnmatch import fnmatch
 import hashlib
+import io
 import json
+import math
 from pathlib import Path
 import re
 import shutil
+import subprocess
+import tarfile
 import time
 
 import build
 import contacts
 import dossier
+import environments
 import evidence
 from gateway import SECRET, packet_leaks
 import grant as grants
@@ -27,7 +33,12 @@ import sandbox
 import subscriptions
 from workflow import Workflow
 
-PYTHON = "/opt/homebrew/bin/python3"
+PYTHON = environments.PYTHON
+ENVIRONMENTS = environments.available()
+MAX_EXPERIMENT_MINUTES = 60
+RESULT_DOCS = ("README.md", "docs/*.md")
+MAX_METRICS_BYTES = 65_536
+METRIC_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 # The candidate's own resumes (read-only) and the bank of their exact bullets built from them. Both
 # are copied into the run folder when its grant is drafted: launchd jobs may not be allowed to read every folder.
 RESUMES = Path.home() / ".arcturus" / "resumes"
@@ -70,6 +81,39 @@ SIZE = (
     "Size this milestone for one build: about 1,500-3,000 lines in total including tests, a specification under "
     "30,000 characters and at most 60 hidden acceptance tests. Later milestones extend the same code."
 )
+EXPERIMENT = (
+    "Projects whose result needs real computation (training, simulation, benchmarks) set experiment_minutes "
+    f"(1-{MAX_EXPERIMENT_MINUTES}), list every metric name in metrics (lowercase, digits and "
+    "underscores) and define each one in the specification, and include experiment.py: run as 'python "
+    "experiment.py --out PATH', it runs the full experiment offline with fixed seeds, may write "
+    "checkpoints and figures only in the folder of PATH, and writes PATH as one JSON object with exactly "
+    "those metrics, each a finite number or a list of at most 1,000 numbers. The runner runs it twice "
+    "after the final review, requires identical metrics, has the results checked independently and "
+    "commits them as results/metrics.json; README and docs cite that file and never state numbers or "
+    "conclusions it does not support. Tests use small, fast configurations of the same code. Otherwise "
+    "experiment_minutes is 0 and metrics is empty."
+)
+
+
+def runner_can():
+    """What the runner can execute and verify today. Only the capability check sees it, never the decide step."""
+    return (
+        "Offline Python in one of these vetted environments: "
+        + "; ".join(f"{k}: {v['about']}" for k, v in ENVIRONMENTS.items())
+        + f". Unit tests up to 5 minutes; a separate experiment run up to {MAX_EXPERIMENT_MINUTES} minutes. "
+        "No network, no package installs, no sockets or services in tests. Builders write Python only. Public "
+        "data (datasets, documents, postings) is not a runner requirement: before the spec, the runner's data "
+        "step finds it on GitHub, Hugging Face and Zenodo, or takes files the operator pinned, checks the "
+        "license and places it read-only in real_data/."
+    )
+
+
+def capability_step():
+    """The capability check's step name: a new one whenever the runner's abilities or the check change, so it is
+    asked again."""
+    return "capability-" + hashlib.sha256((runner_can() + TASKS["capability"]).encode()).hexdigest()[:12]
+
+
 REAL_DATA = (
     "When the packet lists real_data, the project uses those files read-only under real_data/ (paths as "
     "listed), as data only: code and tests never import, execute, eval or doctest anything in it, and never "
@@ -101,19 +145,45 @@ TASKS = {
         "matter). 'skip': not viable (explicit refusal to sponsor, wrong level or role, or the company is not really "
         "hiring). Yash focuses on actively hiring startups; a large established company rarely needs a project. "
         "Weigh impact, fit, freshness, sponsorship evidence and how far a project would stand out. "
-        "Give honest reasons. Unless the decision is project, write 'none' for idea_title, scope, demo, the four "
-        "answers, portfolio_difference and real_data, and give no alternatives or milestones."
+        "In stack, name the technologies the implementation needs (languages, frameworks, data stores, services, "
+        "browsers, infrastructure), chosen from the company's own stack and the problem's real tradeoffs, never "
+        "from what is easiest to run. Whether Arcturus can execute it is checked separately afterwards. Give "
+        "honest reasons. Unless the decision is project, write 'none' for idea_title, scope, demo, the four "
+        "answers, portfolio_difference and real_data, and give no alternatives, milestones or stack."
+    ),
+    "capability": (
+        "Check whether the runner described in 'runner' can execute and verify the decided project as decided. "
+        "Judge only: never change, simplify or re-plan the project, its architecture or its stack, and never "
+        "suggest a substitute. List every requirement the project needs to be built and tested (language "
+        "runtimes, frameworks and packages, data stores, services or sockets, browsers, network access, accounts "
+        "or keys, hardware). For each, status 'supported' with how the runner covers it, or 'missing' with the "
+        "smallest safe extension to the runner (for example a pinned, hash-checked environment or a sandboxed "
+        "local service) in extension, and in approvals every package, download, account, permission or sandbox "
+        "change Yash would have to approve. For a supported requirement, extension and approvals are 'none'. In "
+        "milestones, list every milestone that needs the requirement, numbered from 1 in the decision's order."
     ),
     "spec": (
         "Write the build specification for the chosen project's milestone (milestone names which one; the code "
-        "of earlier milestones is kept and extended). Constraints: Python 3 standard library only, no network, no "
-        "installed packages, no private company data, runs offline. " + REAL_DATA + " The repository has the "
+        "of earlier milestones is kept and extended). Implement the decision's stack as decided (the capability "
+        "check found the runner's environments cover it); never substitute another language, framework or a "
+        "simulation for it. Constraints: Python in the chosen environment (environment: "
+        + "; ".join(f"{k} = {v['about']}" for k, v in ENVIRONMENTS.items())
+        + "; choose the smallest that "
+        "fits), no network, no other packages, no private company data, runs offline. also_test_in names other "
+        "environments the same code must also pass its tests in (to compare package versions; usually empty); each "
+        "test run gets its environment's name in ARCTURUS_ENVIRONMENT, so a test may expect version-specific "
+        "results; the experiment runs in the main one with every listed environment readable. "
+        + EXPERIMENT
+        + " "
+        + REAL_DATA
+        + " The repository has the "
         "package, tests/ with unittest tests, README.md (what it is, why it matters for this company, how to run "
         "it, results, and that it was developed with Arcturus, Yash's multi-agent system), docs/DESIGN.md "
         "(architecture, tradeoffs, limits) and demo.py (runs the main scenario end to end and prints a readable "
         "result). Write precise, testable requirements with exact function names, signatures, inputs, outputs and "
         "edge cases. Then write 2-4 hidden acceptance test files (unittest, file names test_p_*.py) that check "
-        "only behavior the specification states exactly; they import only the standard library and the package. "
+        "only behavior the specification states exactly; they import only the environment's packages and the "
+        "package. "
         "List in data_paths any data files beyond the package, tests, README, docs and demo that the project "
         "needs, as relative glob patterns such as tasks/*.json (an empty list if none). "
         + IN_MEMORY
@@ -177,10 +247,10 @@ TASKS = {
     "notes": (
         "Write interview notes for Yash about this finished project, from the specification, the decision and the "
         "independent review only. Plain words, short sentences. Cover the problem, why this approach (and what "
-        "else was considered), the architecture and data flow, trade-offs, the real results the tests and review "
-        "show (never invent numbers), limitations, what was learned, talking points and questions an engineer "
-        "there is likely to ask, each with a short honest answer. Say that it was developed with Arcturus, Yash's "
-        "multi-agent system, and never that he wrote the code himself."
+        "else was considered), the architecture and data flow, trade-offs, the real results the tests, the review "
+        "and the runner's measured metrics show (never invent numbers), limitations, what was learned, talking "
+        "points and questions an engineer there is likely to ask, each with a short honest answer. Say that it "
+        "was developed with Arcturus, Yash's multi-agent system, and never that he wrote the code himself."
     ),
     "packet": (
         "Prepare Yash's application for this role from his own material only. Mark each main requirement of the "
@@ -199,9 +269,22 @@ TASKS = {
     ),
 }
 TASKS["recheck"] += TASKS["final_review"]
+TASKS["results_review"] = (
+    "Check this project's experimental results, and only them, before they are presented as findings to a hiring "
+    "team. The code already passed its final review: do not review style or code unrelated to the results. metrics "
+    "is what the runner measured; it ran experiment.py twice and both runs gave these exact values. Check that "
+    "experiment.py computes each metric as the specification defines it (follow its calls into the package), that "
+    "the setup supports the claim (seeds, held-out evaluation, baselines, enough runs or seeds, no leakage between "
+    "training and evaluation), and that every number and conclusion in README.md and docs/ follows from these "
+    "metrics. A number that differs from metrics, a conclusion they do not support or a missing essential caveat "
+    "is high, category docs, cause code, with that document's path. A metric computed wrongly or a setup that "
+    "cannot support the claim is high, category correctness, with the path of the code at fault. Otherwise approve."
+)
 TASKS["data_search"] = (
-    "Name up to three web searches that would find the real public datasets, benchmarks, open-source code or "
-    "documents this project should use; real_data names the decision's candidates."
+    "Name up to three short keyword searches (2-5 words, no operators) that would find the real public datasets, "
+    "benchmarks, open-source code or documents this project should use; each runs on the dataset search of Hugging "
+    "Face, the repository search of GitHub and the record search of Zenodo. real_data names the decision's "
+    "candidates."
 )
 TASKS["data"] = (
     "Choose real public data for this project from the captured pages only. For each source give a short name, the "
@@ -230,9 +313,28 @@ SCHEMAS = {
         portfolio_difference=text(800),
         real_data=text(1500),
         milestones=array(text(1000), 4),
+        stack=array(text(200), 12),
+    ),
+    "capability": obj(
+        requirements=array(
+            obj(
+                requirement=text(300),
+                status=choice(["supported", "missing"]),
+                how=text(600),
+                extension=text(1000),
+                approvals=text(800),
+                milestones=array({"type": "integer", "minimum": 1, "maximum": 4}, 4, 1),
+            ),
+            16,
+            1,
+        )
     ),
     "spec": obj(
         package=text(40),
+        environment=choice(list(ENVIRONMENTS)),
+        also_test_in=array(choice(list(ENVIRONMENTS)), 3),
+        experiment_minutes={"type": "integer", "minimum": 0, "maximum": MAX_EXPERIMENT_MINUTES},
+        metrics=array(text(64), 100),
         spec_markdown=text(60_000),
         acceptance_tests=array(obj(name=text(80), text=text(30_000)), 8, 2),
         data_paths=array(text(80), 8),
@@ -310,7 +412,7 @@ TEST_NAME = re.compile(r"test_p_[a-z0-9_]{1,40}\.py")
 PACKAGE = re.compile(r"[a-z][a-z0-9_]{1,30}")
 # Extra paths a spec may ask for: data files in plain folders, never code, tests or anything Python would import.
 DATA_PATH = re.compile(r"(?:[a-z0-9_-]+/){1,3}[a-z0-9_*-]+\.(?:json|jsonl|csv|txt|md|sql)")
-STANDARD_PATHS = ("tests/*.py", "README.md", "docs/*.md", "demo.py", "examples/*.json")
+STANDARD_PATHS = ("tests/*.py", "README.md", "docs/*.md", "demo.py", "examples/*.json", "experiment.py")
 RESEARCH_STEPS = ("extract", "dossier", "projects", "challenge")
 # The ledger's and gate's refusals: the grant, not the model or the work, stopped the step.
 GRANT_REFUSAL = re.compile(
@@ -331,7 +433,45 @@ def check_decide(value, titles):
         problems.append("compare the chosen idea with the others in alternatives")
     if not value["milestones"]:
         problems.append("give 1-4 milestones, the first one first")
+    if not value["stack"]:
+        problems.append("name the stack the implementation needs")
     return problems
+
+
+def check_capability(value, count):
+    """A missing requirement says how to close the gap and which of the count milestones need it."""
+    problems = []
+    for r in value["requirements"]:
+        if any(m > count for m in r["milestones"]):
+            problems.append(f"{r['requirement']}: milestones are numbered 1 to {count}")
+        if r["status"] == "missing" and (blank(r["extension"]) or not r["approvals"].strip()):
+            problems.append(f"{r['requirement']}: give the smallest safe extension and what Yash must approve")
+        if r["status"] == "supported" and blank(r["how"]):
+            problems.append(f"{r['requirement']}: say how the runner covers it")
+    return problems
+
+
+def blank(answer):
+    return answer.strip().lower() in ("", "none")
+
+
+def missing(assessment):
+    """The requirements the runner lacks; an assessment no model gave holds the project too."""
+    if assessment is None:
+        return [
+            {
+                "requirement": "capability check",
+                "extension": "no model answered; the next run asks again",
+                "approvals": "none",
+                "milestones": [1],
+            }
+        ]
+    return [r for r in assessment["requirements"] if r["status"] == "missing"]
+
+
+def first_blocked(held):
+    """The first milestone the runner cannot build yet (None: none); the ones before it can go ahead."""
+    return min((m for r in held for m in r.get("milestones") or [1]), default=None)
 
 
 def portfolio(root, company_id):
@@ -409,13 +549,27 @@ def check_spec(value, previous=None):
         for p in value.get("data_paths", [])
         if not DATA_PATH.fullmatch(p) or p.startswith(("tests/", real_data.FOLDER + "/"))
     ]
-    problems += size_problems(value, previous)
+    problems += size_problems(value, previous) + metric_problems(value)
+    others = value.get("also_test_in", [])
+    if value.get("environment", "stdlib") in others or len(set(others)) < len(others):
+        problems.append("also_test_in lists other environments than the main one, each once")
     problems += [
         f"{t['name']}: tests read real_data/ as data only, never run what they read"
         for t in value["acceptance_tests"]
         if real_data.runs_data(t["text"])
     ]
     return problems + (["acceptance test names must be distinct"] if len(set(names)) < len(names) else [])
+
+
+def metric_problems(value):
+    names, minutes = value.get("metrics", []), value.get("experiment_minutes", 0)
+    if bool(names) != bool(minutes):
+        return ["list the experiment's metrics exactly when experiment_minutes is above 0"]
+    return [
+        f"metric name {n[:70]!r}: lowercase letters, digits and underscores, distinct"
+        for n in names
+        if not METRIC_NAME.fullmatch(n) or names.count(n) > 1
+    ]
 
 
 def kept_tests(previous, value, fixable):
@@ -613,12 +767,29 @@ class Steps(NoteLog, Workflow):
         titles = {i["title"] for i in (packet["ideas"] or {}).get("ideas", [])}
         return self.ask(company, "decide", packet, SCHEMAS["decide"], lambda v: check_decide(v, titles))
 
+    def capability(self, company, decision):
+        """Can the runner build and verify the decided project as it is? The decision is input only."""
+        packet = {
+            "company": company["name"],
+            "idea": chosen_idea(self.lane(company, "routed"), decision),
+            "decision": {
+                k: decision.get(k)
+                for k in ("idea_title", "scope", "why_implementation", "stack", "real_data", "milestones")
+            },
+            "runner": runner_can(),
+            "task": TASKS["capability"],
+        }
+        count = len(decision.get("milestones") or WHOLE_IDEA)
+        return self.ask(company, capability_step(), packet, SCHEMAS["capability"], lambda v: check_capability(v, count))
+
     def spec(self, company, decision, real_data=()):
         """The decided idea's spec; a project marked for revision (or its next milestone) gets a minimal revision
         of its previous spec."""
         lane = self.lane(company, "pipeline")
         revise, previous = read(lane / "revise.json"), read(lane / "spec.json")
-        if not (revise and previous):
+        if previous and not revise:
+            return previous
+        if not revise:
             return self.first_spec(company, decision, real_data)
         packet = {
             "company": company["name"],
@@ -703,21 +874,17 @@ class Steps(NoteLog, Workflow):
         return listing
 
     def data_pages(self, company, queries):
-        store = evidence.Store(self.root / "sources" / company["id"] / "data", evidence.AnyPublicHost(), 40)
-        pages = []
+        """Candidate pages from the listed hosts' searches; SearchFailed when no host could be searched at all."""
+        store = evidence.Store(self.root / "sources" / company["id"] / "data", evidence.AnyPublicHost(), 80)
+        pages, failed = [], []
         for query in queries:
-            _, links = store.search(query, "data")
-            pages += [store.fetch(link, "data") for link in links[:3]]
-        return [
-            {
-                "id": p["id"],
-                "url": p["url"],
-                "text": p["text"][:6000],
-                "links": [link for link in p["links"] if real_data.approved(link)][:60],
-            }
-            for p in pages
-            if p.get("id") and p.get("text")
-        ]
+            found, missed = real_data.search(store, " ".join(re.sub(r"\bsite:\S+", " ", query).split()))
+            pages, failed = pages + found, failed + missed
+        for failure in failed:
+            self.note(company, "pipeline", f"data search failed on {failure}")
+        if failed and not pages:  # nothing could be looked at: never the same as "nothing suitable"
+            raise real_data.SearchFailed("; ".join(failed)[:300])
+        return pages
 
     def notes(self, company, decision, result, spec):
         """Interview notes from the spec, the decision and the review: never anything the code printed."""
@@ -728,8 +895,11 @@ class Steps(NoteLog, Workflow):
             "specification": spec,
             "review": result["review"],
             "tests": {"own": count(result["own"]), "acceptance": count(result["hidden"])},
+            "metrics": result.get("metrics"),
             "task": TASKS["notes"],
         }
+        if packet_leaks(packet, [self.key(provider) for provider in self.manifest["keys"]]):
+            raise llm.SecurityStop("notes packet holds credential-like text; nothing was sent")
         return self.ask(company, "notes", packet, SCHEMAS["notes"])
 
     def packet(self, company, project=None):
@@ -797,25 +967,58 @@ def evidence_section(evidence):
     )
 
 
+def runtime_section(spec):
+    names = [spec.get("environment", "stdlib"), *spec.get("also_test_in", [])]
+    minutes = spec.get("experiment_minutes", 0)
+    lines = [f"- `{n}`: {ENVIRONMENTS[n]['about']}." for n in names]
+    tests = (
+        " Tests run in each environment and must pass in all; ARCTURUS_ENVIRONMENT holds its name. Each "
+        "environment's Python is its folder's bin/python."
+        if len(names) > 1
+        else ""
+    )
+    run = (
+        f" After the final review the runner runs `python experiment.py --out PATH` twice in `{names[0]}` with "
+        f"every environment above readable ({minutes}-minute limit each), requires identical metrics, and commits "
+        "them as results/metrics.json."
+        if minutes
+        else ""
+    )
+    return "\n\n## Runtime (set by the runner)\n\n" + "\n".join(lines) + "\n" + (tests + run).strip() + "\n"
+
+
 def materialize(base, company, spec, keys, repairs, keep_code=False, evidence=()):
     """Write the spec (with the company evidence) and hidden tests into the execution area; return the manifest."""
     protected = base / "protected"
     shutil.rmtree(protected, ignore_errors=True)  # a revised spec replaces every hidden test
     protected.mkdir(parents=True)
-    (base / "SPEC.md").write_text(spec["spec_markdown"] + evidence_section(evidence))
+    (base / "SPEC.md").write_text(spec["spec_markdown"] + runtime_section(spec) + evidence_section(evidence))
     digests = {}
     for item in spec["acceptance_tests"]:
         (protected / item["name"]).write_text(item["text"])
         digests[item["name"]] = hashlib.sha256(item["text"].encode()).hexdigest()
-    package = spec["package"]
+    package, name = spec["package"], spec.get("environment", "stdlib")
+    env, minutes = ENVIRONMENTS[name], spec.get("experiment_minutes", 0)
+    tested = [{"name": n, **ENVIRONMENTS[n]} for n in (name, *spec.get("also_test_in", []))]
     return {
         "company": {"id": company["id"], "name": company["name"]},
         "spec": str(base / "SPEC.md"),
         "base": str(base),
         "allowed": [f"{package}/*.py", *STANDARD_PATHS, *spec.get("data_paths", [])],
-        "required": [f"{package}/__init__.py", "README.md", "docs/DESIGN.md", "demo.py"],
+        "required": [
+            f"{package}/__init__.py",
+            "README.md",
+            "docs/DESIGN.md",
+            "demo.py",
+            *(["experiment.py"] if minutes else []),
+        ],
         "protected": {"dir": str(protected), "pattern": "test_p_*.py", "sha256": digests},
-        "python": PYTHON,
+        "python": env["python"],
+        "read": env["read"],
+        "env": env["env"],
+        "test_environments": tested,
+        "experiment_minutes": minutes,
+        "metrics": spec.get("metrics", []),
         "repairs": repairs,
         "arms": {"json": {"workspace": str(base / "repo")}},
         "keys": keys,
@@ -851,6 +1054,34 @@ class ProjectBuild(NoteLog, build.Build):
 
     def rounds(self, name, builder, timeline):
         super().rounds(name, KeepCode(builder) if self.manifest["keep_code"] else builder, timeline)
+
+    def commit(self, name, message, init=False):
+        """Files the given project fixes (its pre-registration, an adapter) are put back before every commit."""
+        workspace = self.workspace(name)
+        for path, content in self.manifest.get("frozen", {}).items():
+            target = workspace / path
+            if target.is_symlink() or not target.exists() or target.read_text() != content:
+                target.unlink(missing_ok=True)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content)
+        super().commit(name, message, init)
+
+
+def seed_workspace(pb, seed):
+    """Start the workspace from the committed files of a given repository, once (a marker in the arm)."""
+    pb.prepare("json")
+    marker = pb.arm("json") / "seeded"
+    if marker.exists():
+        return
+    archive = subprocess.run(
+        ["/usr/bin/git", "-C", seed["repo"], "archive", "--format=tar", seed["commit"]], capture_output=True, check=True
+    ).stdout
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        if links := [m.name for m in tar.getmembers() if m.issym() or m.islnk()]:
+            raise ValueError(f"the seed holds links, which could redirect writes: {links[:3]}")
+        tar.extractall(pb.workspace("json"), filter="data")
+    pb.commit("json", f"Starting code from {Path(seed['repo']).name} at {seed['commit'][:12]}")
+    marker.write_text(seed["commit"])
 
 
 def sync_spec(pb):
@@ -965,7 +1196,21 @@ def head(pb):
 
 
 def changed_files(pb, since):
-    return build.git(pb.arm("json"), pb.workspace("json"), "diff", "--name-only", since, "HEAD").split()
+    """Changed paths, NUL-separated by git so a name with spaces stays one path."""
+    out = build.git(pb.arm("json"), pb.workspace("json"), "diff", "--name-only", "-z", since, "HEAD")
+    return [path for path in out.split("\0") if path]
+
+
+def uncommitted(pb):
+    """Paths written but not committed (modified or new; git-ignored data stays out)."""
+    rows = build.git(pb.arm("json"), pb.workspace("json"), "status", "--porcelain", "-z", "-uall").split("\0")
+    return [r[3:] for r in rows if r]
+
+
+def discard_uncommitted(pb):
+    arm, workspace = pb.arm("json"), pb.workspace("json")
+    build.git(arm, workspace, "checkout", "--", ".")
+    build.git(arm, workspace, "clean", "-fdq")
 
 
 def final_review(pb, router, tag, previous=None):
@@ -1059,6 +1304,26 @@ def plus_review(pb, router, step, packet):
     return value
 
 
+def results_review(pb, router, metrics, n):
+    """A focused, independent check of the experiment's results and the claims made from them. The step name holds
+    a fingerprint of spec, code and metrics, so a saved review is reused only for the evidence it judged."""
+    evidence = json.dumps([pb.spec, head(pb), metrics], sort_keys=True).encode()
+    step = f"review-results-{n}-{hashlib.sha256(evidence).hexdigest()[:12]}"
+    packet = {"task": TASKS["results_review"], "specification": pb.spec, "files": pb.files("json"), "metrics": metrics}
+    review, model = saved_review(pb, step)
+    if review is None:
+        review, model = first_review(pb, router, step, packet)
+    if review is None:
+        return None
+    (pb.lane(pb.company, "json") / f"{step}.model").write_text(model)
+    return {"review": review, "model": model, "commit": head(pb), "own": {}, "hidden": {}}
+
+
+def docs_only(review):
+    """Every blocking finding is about README or docs: a wording repair can fix it without touching code."""
+    return all(any(fnmatch(f["path"], g) for g in RESULT_DOCS) for f in blocking(review))
+
+
 def blocking(review):
     """High findings, and medium ones about correctness or security, keep a project from being accepted."""
     return [
@@ -1145,7 +1410,7 @@ def regressed(before, after):
 def revert(pb, commit, message):
     """Undo a repair: the workspace goes back to the commit before it, as a new commit (history kept)."""
     arm, workspace = pb.arm("json"), pb.workspace("json")
-    kept = set(build.git(arm, workspace, "ls-tree", "-r", "--name-only", commit).split())
+    kept = set(build.git(arm, workspace, "ls-tree", "-r", "-z", "--name-only", commit).split("\0")) - {""}
     for path in changed_files(pb, commit):
         if path not in kept:
             (workspace / path).unlink(missing_ok=True)
@@ -1153,21 +1418,86 @@ def revert(pb, commit, message):
     pb.commit("json", message)
 
 
-def run_demo(pb):
-    """Run demo.py in the sandbox; its output stays local evidence, never sent to a model."""
-    workspace, scratch = pb.workspace("json"), pb.arm("json") / "demo"
-    scratch.mkdir(parents=True, exist_ok=True)
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(scratch), "TMPDIR": str(scratch), "PYTHONDONTWRITEBYTECODE": "1"}
-    out = pb.arm("json") / "demo-output.txt"  # the sandbox refuses output files inside the job's write paths
+def run_job(pb, name, args, seconds, env=None):
+    """Run one of the project's scripts in the sandbox, in a test environment (the first by default), writing only
+    to a fresh scratch folder; its output stays local evidence, never sent to a model."""
+    env = env or pb.test_environments()[0]
+    workspace, arm = pb.workspace("json"), pb.arm("json")
+    scratch = arm / name
+    shutil.rmtree(scratch, ignore_errors=True)
+    scratch.mkdir(parents=True)
+    variables = {
+        **env["env"],
+        "ARCTURUS_ENVIRONMENT": env["name"],
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(scratch),
+        "TMPDIR": str(scratch),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "MPLBACKEND": "Agg",
+    }
+    out = arm / f"{name}-output.txt"  # the sandbox refuses output files inside the job's write paths
     code, timed_out, _ = sandbox.run(
-        [PYTHON, "-E", "-s", "-B", "demo.py"],
-        [workspace],
+        [env["python"], "-E", "-s", "-B", *args],
+        [workspace, *env["read"]],
         [scratch],
-        env,
+        variables,
         workspace,
-        120,
+        seconds,
         out,
-        pb.arm("json") / "demo-errors.txt",
+        arm / f"{name}-errors.txt",
         deny_read=list(pb.manifest["keys"].values()),
     )
     return {"exit": code, "timed_out": timed_out, "output": str(out)}
+
+
+def run_demo(pb):
+    return run_job(pb, "demo", ["demo.py"], 120)
+
+
+def check_metrics(raw, names):
+    """The metrics experiment.py wrote, or the problems that make them unusable: exactly the spec's names, each a
+    number or a list of numbers, so nothing the code under test writes reaches a model or the write-up as text."""
+    if raw is None:
+        return None, ["no metrics file (or not a plain file of at most 64 KB)"]
+    try:
+        value = json.loads(raw, parse_constant=lambda name: None)
+    except ValueError as exc:
+        return None, [f"not JSON: {exc}"[:200]]
+    if not isinstance(value, dict) or set(value) != set(names):
+        return None, [f"must be one JSON object with exactly the metrics {sorted(names)}"]
+    problems = [
+        f"{k}: a finite number or a list of at most 1,000 numbers"
+        for k, v in value.items()
+        if not (number(v) or isinstance(v, list) and len(v) <= 1000 and all(map(number, v)))
+    ]
+    return (None if problems else value), problems
+
+
+def experiment_environment(pb):
+    """The first test environment, with every test environment readable and their variables set, so an experiment
+    can run and compare them (each one's bin/python)."""
+    envs = pb.test_environments()
+    return {
+        **envs[0],
+        "read": [p for e in envs for p in e["read"]],
+        "env": {k: v for e in reversed(envs) for k, v in e["env"].items()},
+    }
+
+
+def run_experiment(pb, env):
+    """experiment.py in the sandbox, within the spec's time limit: (metrics, problems)."""
+    minutes = pb.manifest["experiment_minutes"]
+    metrics = pb.arm("json") / "experiment" / "metrics.json"
+    result = run_job(pb, "experiment", ["experiment.py", "--out", str(metrics)], minutes * 60, env)
+    if result["timed_out"]:
+        return None, [f"experiment.py ran past {minutes} minutes"]
+    if result["exit"]:
+        return None, [f"experiment.py exit {result['exit']}"]
+    return check_metrics(sandbox.read_job_file(metrics, MAX_METRICS_BYTES), pb.manifest["metrics"])
+
+
+def number(value):
+    """A finite JSON number (never a bool), small enough to compare and plot."""
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return isinstance(value, int) and not isinstance(value, bool) and abs(value) < 2**63

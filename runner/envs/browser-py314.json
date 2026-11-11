@@ -1,0 +1,4 @@
+{"about": "Python 3.14 with Playwright 1.65.0 driving Chromium headless shell 158; pages come from page.set_content or files in the repository (no network)",
+ "read": ["/Users/Shared/arcturus-exec/browsers"],
+ "env": {"PLAYWRIGHT_BROWSERS_PATH": "/Users/Shared/arcturus-exec/browsers"},
+ "setup": [["-I", "-m", "playwright", "install", "--only-shell", "chromium"]]}

@@ -15,6 +15,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runner"))
 import build
 import dossier
+import environments
 from grant_fixture import keys, sign, signed_root
 import grant as grants
 import pipeline
@@ -48,6 +49,7 @@ FILES = {
     "demo.py": "from calc.ops import add\nprint(add(2, 3))\n",
 }
 COMPANIES = ("acme", "globex", "initech")
+ML_ENV = str(environments.ROOT / "ml-py314")
 BUGGY = "def add(a, b):\n    return a + b + 1\n"
 READS_DATA = {
     "name": "test_p_data.py",
@@ -55,6 +57,7 @@ READS_DATA = {
     "class D(unittest.TestCase):\n    def test_rows(self):\n        self.assertEqual("
     "Path('real_data/rows/rows.csv').read_text(), 'a,b\\n1,2\\n')\n",
 }
+DATA_PAGES = pipeline_steps.Steps.data_pages  # setUp replaces it with captured pages; a test may restore it
 CORRECTNESS = {
     "path": "calc/ops.py",
     "severity": "medium",
@@ -77,6 +80,10 @@ class Fakes(Provider):
         self.reviewed_specs, self.bodies, self.bad_parts, self.key_shaped = [], [], set(), 0
         self.fast, self.milestones, self.sources, self.specs = {"Initech"}, ["One night."], [], []
         self.buggy, self.on_repair, self.final_reviewed, self.review_packets = False, {}, False, []
+        self.files, self.needs, self.environment, self.experiment_minutes = dict(FILES), [], "stdlib", 0
+        self.notes_packets, self.metric_names, self.results_findings, self.results_packets = [], [], [], []
+        self.also_test_in, self.stack, self.decide_packets, self.capability_packets = [], ["Python"], [], []
+        self.needed_by = [1]
 
     def reply(self, host, body):
         self.bodies.append(body)
@@ -96,6 +103,7 @@ class Fakes(Provider):
         return getattr(self, step)(packet)
 
     def decide(self, packet):
+        self.decide_packets.append(packet)
         if packet["company"] in self.fast:
             return {
                 "decision": "fast",
@@ -107,6 +115,7 @@ class Fakes(Provider):
                 "demo": "none",
                 "alternatives": [],
                 "milestones": [],
+                "stack": [],
                 **dict.fromkeys(("portfolio_difference", "real_data", *pipeline_steps.FOUR), "none"),
             }
         return {
@@ -125,12 +134,50 @@ class Fakes(Provider):
             "alternatives": [{"title": "Idea 0", "why_not": "Weaker evidence."}],
             "real_data": "none",
             "milestones": self.milestones,
+            "stack": self.stack,
+        }
+
+    def capability(self, packet):
+        """Supported unless a test names missing requirements in needs."""
+        self.capability_packets.append(packet)
+        gaps = [
+            {
+                "requirement": n,
+                "status": "missing",
+                "how": "none",
+                "extension": f"A pinned {n} environment.",
+                "approvals": f"The {n} packages.",
+                "milestones": self.needed_by,
+            }
+            for n in self.needs
+        ]
+        return {
+            "requirements": gaps
+            or [
+                {
+                    "requirement": "Python",
+                    "status": "supported",
+                    "how": "stdlib",
+                    "extension": "none",
+                    "approvals": "none",
+                    "milestones": [1],
+                }
+            ]
         }
 
     def spec(self, packet):
         self.specs.append(packet)
         hidden = HIDDEN + ([READS_DATA] if packet["real_data"] else [])
-        return {"package": "calc", "spec_markdown": SPEC, "acceptance_tests": hidden, "data_paths": []}
+        return {
+            "package": "calc",
+            "environment": self.environment,
+            "also_test_in": self.also_test_in,
+            "experiment_minutes": self.experiment_minutes,
+            "metrics": self.metric_names,
+            "spec_markdown": SPEC,
+            "acceptance_tests": hidden,
+            "data_paths": [],
+        }
 
     def data_search(self, packet):
         return {"queries": ["calc rows dataset"]}
@@ -139,6 +186,7 @@ class Fakes(Provider):
         return {"sources": self.sources, "needs_approval": [], "synthetic_reason": "none" if self.sources else "None."}
 
     def notes(self, packet):
+        self.notes_packets.append(packet)
         return {
             **dict.fromkeys(
                 (
@@ -164,11 +212,18 @@ class Fakes(Provider):
         self.on_step.pop("plan", lambda: None)()
         if self.model.name in self.bad_plans:
             return {"groups": [{"files": [], "why": "extra key"}], "notes": "n"}
-        return {"groups": [{"files": [{"path": p, "purpose": "p"} for p in FILES]}], "notes": "n"}
+        paths = list(self.files)
+        return {
+            "groups": [
+                {"files": [{"path": p, "purpose": "p"} for p in paths[i : i + 6]]} for i in range(0, len(paths), 6)
+            ],
+            "notes": "n",
+        }
 
     def build(self, packet):
         files = [
-            {"path": p, "text": BUGGY if self.buggy and p == "calc/ops.py" else FILES[p]} for p in packet["write_now"]
+            {"path": p, "text": BUGGY if self.buggy and p == "calc/ops.py" else self.files[p]}
+            for p in packet["write_now"]
         ]
         if self.key_shaped:
             self.key_shaped -= 1
@@ -195,7 +250,10 @@ class Fakes(Provider):
     def repair_part(self, packet):
         if set(packet["write_now"]) & self.bad_parts:
             return {"files": [{"path": "elsewhere.py", "text": ""}], "notes": "n"}
-        return {"files": [{"path": p, "text": FILES[p] + "# repaired\n"} for p in packet["write_now"]], "notes": "n"}
+        return {
+            "files": [{"path": p, "text": self.files[p] + "# repaired\n"} for p in packet["write_now"]],
+            "notes": "n",
+        }
 
     def packet(self, packet):
         first = packet["bullets"][0]["text"]
@@ -221,6 +279,12 @@ class Fakes(Provider):
         return {"verdict": "changes" if findings else "approve", "summary": "Reviewed.", "findings": findings}
 
     recheck = final_review
+
+    def results_review(self, packet):
+        """By default the claims hold; results_findings lists one round's findings each, first round first."""
+        self.results_packets.append(packet)
+        findings = self.results_findings.pop(0) if self.results_findings else []
+        return {"verdict": "changes" if findings else "approve", "summary": "Results.", "findings": findings}
 
     def respec(self, packet):
         self.on_step.pop("respec", lambda: None)()
@@ -313,7 +377,7 @@ class Queue(unittest.TestCase):
             patch.object(subscriptions, "claude", self.claude),
             patch.object(subscriptions, "codex", self.codex),
             patch.object(subscriptions, "CODEX_SESSIONS", Path(self.enterContext(tempfile.TemporaryDirectory()))),
-            patch.object(pipeline_steps, "PYTHON", sys.executable),
+            patch.dict(pipeline_steps.ENVIRONMENTS["stdlib"], {"python": sys.executable}),
             patch.object(pipeline_steps.Steps, "data_pages", lambda steps, company, queries: self.pages),
             patch.object(pipeline, "SANDBOX_WAIT", 0),
             patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "HOME": str(Path.home())}, clear=True),
@@ -375,6 +439,10 @@ class Queue(unittest.TestCase):
         report = (self.run / "report.md").read_text()
         self.assertIn("| Acme | 5 | ready | project | Idea 1 | ready |", report)
         self.assertIn("Accepted with no rescue: 2 of 2 projects started", report)
+        asked = json.loads((self.lane("acme") / "models.json").read_text())
+        self.assertIn("data-search", asked, "a project without a seed still searches for real data")
+        self.assertIn(pipeline_steps.capability_step(), asked)
+        self.assertIn("## Projects held for a runner capability (kept as decided)\n\n- None.", report)
         self.assertIn("# Interview notes", (Path(project["repo"]) / "docs" / "INTERVIEW.md").read_text())
         self.assertIn("Plans:", report)
 
@@ -927,6 +995,521 @@ class Queue(unittest.TestCase):
         self.assertTrue(json.loads((self.lane("acme") / "project.json").read_text())["accepted"])
         self.assertEqual([s for _, _, s in self.plan_calls].count("respec"), 1, "milestone 2 was built, once")
 
+    def test_an_unsupported_stack_is_held_as_decided_with_an_actionable_gap_report(self):
+        self.fakes.stack, self.fakes.needs = ["TypeScript", "React", "Playwright"], ["Node.js 22 with TypeScript"]
+        self.execute()
+        self.assertEqual(self.states()["acme"], ("ready", "project"), "never turned into a fast application")
+        decision = json.loads((self.lane("acme") / "decide.json").read_text())
+        self.assertEqual((decision["idea_title"], decision["stack"]), ("Idea 1", ["TypeScript", "React", "Playwright"]))
+        self.assertFalse((self.lane("acme") / "spec.json").exists(), "nothing is built on a stack it cannot run")
+        self.assertTrue((self.lane("acme") / "outreach.json").exists())
+        self.assertEqual(self.fakes.capability_packets[0]["decision"]["stack"], ["TypeScript", "React", "Playwright"])
+        note = next(r["note"] for r in pipeline.Queue(self.run).rows() if r["id"] == "acme")
+        self.assertIn("project held at milestone 1, needs: Node.js 22 with TypeScript", note)
+        report = (self.run / "report.md").read_text()
+        self.assertIn("| Idea 1 | held: runner capability missing |", report)
+        self.assertIn("- **Acme**: Idea 1 (stack: TypeScript, React, Playwright)", report)
+        self.assertIn(
+            "Missing Node.js 22 with TypeScript (milestones 1). Smallest safe extension: A pinned Node.js 22 with "
+            "TypeScript environment. Needs approval: The Node.js 22 with TypeScript packages.",
+            report,
+        )
+        self.assertIn("Accepted with no rescue: 0 of 0 projects started", report, "a held project never started")
+
+    def test_a_capability_check_with_no_answer_holds_the_project_and_says_so(self):
+        self.enterContext(
+            patch.object(
+                Fakes,
+                "capability",
+                lambda fakes, packet: {
+                    "requirements": [
+                        {
+                            "requirement": "Go 1.25",
+                            "status": "missing",
+                            "how": "none",
+                            "extension": "none",
+                            "approvals": "",
+                            "milestones": [1],
+                        }
+                    ]
+                },
+            )
+        )
+        self.execute()
+        self.assertEqual(self.states()["acme"], ("ready", "project"))
+        self.assertFalse((self.lane("acme") / "spec.json").exists())
+        report = (self.run / "report.md").read_text()
+        self.assertIn(
+            "Missing capability check (milestones 1). Smallest safe extension: no model answered; the next run "
+            "asks again. Needs approval: none",
+            report,
+        )
+
+    def test_an_overridden_project_is_checked_and_a_retry_builds_it_once_the_runner_can(self):
+        pipeline.main([str(self.run), "override", "initech", "project"])
+        self.fakes.fast, self.fakes.needs = set(), ["Rust 1.90"]
+        self.execute()
+        self.assertEqual(self.states()["initech"], ("ready", "project"))
+        self.assertFalse((self.lane("initech") / "spec.json").exists(), "an override never skips the check")
+        report = (self.run / "report.md").read_text()
+        self.assertIn("`pipeline.py RUN retry COMPANY`", report)
+        self.fakes.needs = []
+        with patch.dict(pipeline_steps.ENVIRONMENTS, {"rust-1-90": {"about": "Rust 1.90", "python": ""}}):
+            pipeline.main([str(self.run), "retry", "initech"])
+            self.execute()
+        self.assertTrue(json.loads((self.lane("initech") / "project.json").read_text())["accepted"])
+        self.assertFalse((self.lane("initech") / "held.json").exists())
+
+    def test_milestones_before_a_gap_are_built_and_the_project_stays_partial_until_the_runner_can(self):
+        self.only_acme_builds()
+        self.fakes.milestones, self.fakes.needs, self.fakes.needed_by = (
+            ["The core.", "The LLM study."],
+            ["LLM calls"],
+            [2],
+        )
+        self.execute()
+        lane = self.lane("acme")
+        self.assertTrue(json.loads((lane / "milestone-1.json").read_text())["accepted"])
+        self.assertFalse((lane / "project.json").exists(), "a partial project is never an accepted one")
+        self.assertEqual(json.loads((lane / "decide.json").read_text())["milestones"], ["The core.", "The LLM study."])
+        report = (self.run / "report.md").read_text()
+        self.assertIn("| Idea 1 | partial: 1 milestones accepted, held |", report)
+        self.assertIn("Milestone 1 accepted (part of the project, not the finished project)", report)
+        self.assertIn("Missing LLM calls (milestones 2).", report)
+        self.assertIn("Accepted with no rescue: 0 of 0 projects started", report)
+        self.fakes.needs = []
+        with patch.dict(pipeline_steps.ENVIRONMENTS, {"llm": {"about": "LLM calls through the broker", "python": ""}}):
+            pipeline.main([str(self.run), "retry", "acme"])
+            self.execute()
+        self.assertTrue(json.loads((lane / "project.json").read_text())["accepted"])
+        self.assertIn("2 of 2: The LLM study.", routing.read(lane / "revise.json")["reason"])
+
+    def test_selection_sees_the_same_research_whatever_the_runner_can_do(self):
+        """The decide step's input carries nothing about the runner, so its choice cannot depend on it."""
+        run = self.execute()
+        company = run.company("acme")
+        before = next(p for p in self.fakes.decide_packets if p["company"] == "Acme")
+        (self.lane("acme") / "decide.json").unlink()
+        with patch.dict(pipeline_steps.ENVIRONMENTS, {"rust-1-90": {"about": "Rust 1.90 with cargo", "python": ""}}):
+            run.steps.decide(company)
+        self.assertEqual(self.fakes.decide_packets[-1], before)
+        text = json.dumps(before)
+        for runner_word in (*pipeline_steps.ENVIRONMENTS, pipeline_steps.runner_can()[:30], "rust-1-90"):
+            self.assertNotIn(runner_word, text)
+        self.assertIn(pipeline_steps.runner_can(), json.dumps(self.fakes.capability_packets[0]))
+
+    def test_the_capability_check_is_asked_again_once_the_runner_changes(self):
+        first = pipeline_steps.capability_step()
+        with patch.dict(pipeline_steps.ENVIRONMENTS, {"node-22": {"about": "Node.js 22, TypeScript", "python": ""}}):
+            self.assertNotEqual(pipeline_steps.capability_step(), first)
+        self.assertEqual(pipeline_steps.capability_step(), first)
+
+    def test_a_gap_must_say_how_to_close_it_and_which_milestones_need_it(self):
+        gap = {
+            "requirement": "Go 1.25",
+            "status": "missing",
+            "how": "none",
+            "extension": "none",
+            "approvals": "",
+            "milestones": [1],
+        }
+        self.assertTrue(pipeline_steps.check_capability({"requirements": [gap]}, 2))
+        fixed = {**gap, "extension": "A pinned Go toolchain.", "approvals": "The Go download."}
+        self.assertEqual(pipeline_steps.check_capability({"requirements": [fixed]}, 2), [])
+        self.assertTrue(pipeline_steps.check_capability({"requirements": [{**fixed, "milestones": [3]}]}, 2))
+        self.assertEqual(pipeline_steps.missing(None)[0]["requirement"], "capability check", "no answer holds too")
+
+    def test_a_data_search_no_host_answered_parks_the_project_and_is_not_saved_as_no_data(self):
+        self.only_acme_builds()
+        self.enterContext(patch.object(pipeline_steps.Steps, "data_pages", DATA_PAGES))
+        self.enterContext(patch.object(real_data, "search", lambda store, query: ([], ["a result: HTTP 403"])))
+        self.execute()
+        status = json.loads((self.lane("acme") / "project-status.json").read_text())
+        self.assertTrue(status["reason"].startswith("real-data search failed, no host answered"))
+        self.assertFalse((self.lane("acme") / "real-data.json").exists(), "the next run searches again")
+        self.assertFalse((self.lane("acme") / "spec.json").exists(), "nothing is built as if no data existed")
+        self.assertTrue((self.lane("acme") / "outreach.json").exists())
+
+    def test_a_failing_experiment_parks_the_project_with_its_reason(self):
+        self.fakes.experiment_minutes, self.fakes.metric_names = 1, ["x"]
+        self.fakes.files["experiment.py"] = "raise SystemExit(3)\n"
+        self.execute()
+        self.assertTrue(self.parked("acme"))
+        status = json.loads((self.lane("acme") / "project-status.json").read_text())
+        self.assertEqual(status["reason"], "experiment: experiment.py exit 3")
+
+    @unittest.skipUnless("ml-py314" in pipeline_steps.ENVIRONMENTS, "vetted ML environment not on this machine")
+    def test_an_rl_experiment_trains_checkpoints_resumes_and_reproduces_in_the_ml_environment(self):
+        """End to end through the real sandbox: NumPy tests, then the experiment, its metrics committed."""
+        self.fakes.environment, self.fakes.experiment_minutes = "ml-py314", 2
+        self.fakes.metric_names = [
+            "episodes",
+            "greedy_steps_to_goal",
+            "max_abs_q_difference",
+            "reproduced",
+            "returns_last_20",
+        ]
+        self.fakes.files["experiment.py"] = (Path(__file__).parent / "fixtures" / "rl_experiment.py").read_text()
+        self.fakes.files["tests/test_numpy.py"] = (
+            "import unittest\nimport numpy\n\n\nclass N(unittest.TestCase):\n"
+            "    def test_sum(self):\n"
+            "        self.assertEqual(int(numpy.arange(3).sum()), 3)\n"
+        )
+        self.execute()
+        project = json.loads((self.lane("acme") / "project.json").read_text())
+        self.assertTrue(project["accepted"])
+        self.assertEqual(project["project_tests"]["passed"], 2, "the NumPy test ran in the ML environment")
+        metrics = project["metrics"]
+        self.assertEqual((metrics["reproduced"], metrics["max_abs_q_difference"]), (1, 0.0))
+        self.assertEqual(metrics["greedy_steps_to_goal"], 7)
+        committed = json.loads((Path(project["repo"]) / "results" / "metrics.json").read_text())
+        self.assertEqual(committed, metrics)
+        self.assertEqual(self.fakes.notes_packets[-1]["metrics"], metrics, "interview notes use the measured numbers")
+        self.assertEqual(next(self.lane("acme", "json").glob("review-results-0-*.model")).read_text(), "codex")
+
+    @unittest.skipUnless("web-py314" in pipeline_steps.ENVIRONMENTS, "vetted web environment not on this machine")
+    def test_a_fastapi_and_pydantic_project_is_built_and_tested_in_the_web_environment(self):
+        """End to end through the real sandbox: a FastAPI app with a Pydantic model, tested in memory."""
+        self.fakes.environment = "web-py314"
+        self.fakes.files["calc/api.py"] = (
+            "from fastapi import FastAPI\nfrom pydantic import BaseModel, Field\n\nfrom calc.ops import add\n\n\n"
+            "class Pair(BaseModel):\n    a: int = Field(ge=0, le=1000)\n    b: int = Field(ge=0, le=1000)\n\n\n"
+            "app = FastAPI()\n\n\n@app.post('/add')\ndef add_pair(pair: Pair):\n"
+            "    return {'sum': add(pair.a, pair.b)}\n"
+        )
+        self.fakes.files["tests/test_api.py"] = (
+            "import unittest\n\nfrom fastapi.testclient import TestClient\n\nfrom calc.api import app\n\n\n"
+            "class Api(unittest.TestCase):\n    def test_add_and_reject(self):\n"
+            "        client = TestClient(app)\n"
+            "        self.assertEqual(client.post('/add', json={'a': 2, 'b': 3}).json(), {'sum': 5})\n"
+            "        self.assertEqual(client.post('/add', json={'a': -1, 'b': 3}).status_code, 422)\n\n"
+            "    def test_a_yaml_spec_loads_safely(self):\n        import yaml\n"
+            "        self.assertEqual(yaml.safe_load('pair: {a: 2, b: 3}'), {'pair': {'a': 2, 'b': 3}})\n"
+            "        with self.assertRaises(yaml.constructor.ConstructorError):\n"
+            "            yaml.safe_load('!!python/object/apply:os.system [id]')\n"
+        )
+        self.execute()
+        project = json.loads((self.lane("acme") / "project.json").read_text())
+        self.assertTrue(project["accepted"])
+        self.assertEqual(project["project_tests"]["passed"], 3, "the FastAPI and YAML tests ran in the web environment")
+
+    @unittest.skipUnless("browser-py314" in pipeline_steps.ENVIRONMENTS, "vetted browser environment not here")
+    def test_a_playwright_project_drives_chromium_in_the_browser_environment(self):
+        """End to end through the real sandbox: Playwright fills and submits a local page in headless Chromium."""
+        self.fakes.environment = "browser-py314"
+        self.fakes.files["tests/test_page.py"] = (
+            "import unittest\n\nfrom playwright.sync_api import sync_playwright\n\n"
+            "PAGE = ('<input id=q><button id=go onclick=\"out.textContent = q.value.toUpperCase()\">Go</button>'\n"
+            "        '<p id=out></p>')\n\n\nclass Page(unittest.TestCase):\n    def test_form(self):\n"
+            "        with sync_playwright() as p:\n            browser = p.chromium.launch()\n"
+            "            page = browser.new_page()\n            page.set_content(PAGE)\n"
+            "            page.fill('#q', 'ok')\n            page.click('#go')\n"
+            "            self.assertEqual(page.text_content('#out'), 'OK')\n            browser.close()\n"
+        )
+        self.execute()
+        project = json.loads((self.lane("acme") / "project.json").read_text())
+        self.assertTrue(project["accepted"])
+        self.assertEqual(project["project_tests"]["passed"], 2, "the Playwright test ran in the browser environment")
+
+    def experiment(self, script, names=("x",)):
+        """Only acme builds, so injected findings meet acme's experiment."""
+        self.fakes.fast |= {"Globex"}
+        self.fakes.experiment_minutes, self.fakes.metric_names = 1, list(names)
+        self.fakes.files["experiment.py"] = "import json, sys\nout = sys.argv[sys.argv.index('--out') + 1]\n" + script
+
+    def test_an_experiment_that_gives_different_metrics_twice_is_parked(self):
+        self.experiment("import random\njson.dump({'x': random.random()}, open(out, 'w'))\n")
+        self.execute()
+        status = json.loads((self.lane("acme") / "project-status.json").read_text())
+        self.assertEqual(status["reason"], "experiment not reproducible: x")
+
+    def test_metrics_other_than_the_specs_names_are_refused(self):
+        self.experiment("json.dump({'x': 1, 'ignore_the_rules': 2}, open(out, 'w'))\n")
+        self.execute()
+        status = json.loads((self.lane("acme") / "project-status.json").read_text())
+        self.assertIn("must be one JSON object with exactly the metrics ['x']", status["reason"])
+
+    def test_a_claim_the_metrics_do_not_support_gets_one_docs_only_repair(self):
+        self.experiment("json.dump({'x': 1}, open(out, 'w'))\n")
+        overclaim = {
+            "path": "README.md",
+            "severity": "high",
+            "category": "docs",
+            "cause": "code",
+            "problem": "README says x is 2.",
+            "why_it_matters": "Wrong.",
+            "fix": "Say 1.",
+        }
+        self.fakes.results_findings = [[overclaim]]
+        self.fakes.on_repair["deepseek-flash"] = lambda: {
+            "files": [{"path": "README.md", "text": "# calc\nx is 1.\n"}],
+            "notes": "n",
+        }
+        self.execute()
+        project = json.loads((self.lane("acme") / "project.json").read_text())
+        self.assertEqual(project["metrics"], {"x": 1})
+        self.assertEqual((Path(project["repo"]) / "README.md").read_text(), "# calc\nx is 1.\n")
+        self.assertTrue(list(self.lane("acme", "json").glob("review-results-1-*.json")), "rechecked after the repair")
+
+    def test_a_results_repair_may_not_touch_code(self):
+        self.experiment("json.dump({'x': 1}, open(out, 'w'))\n")
+        self.fakes.results_findings = [
+            [
+                {
+                    "path": "docs/DESIGN.md",
+                    "severity": "high",
+                    "category": "docs",
+                    "cause": "code",
+                    "problem": "Overclaims.",
+                    "why_it_matters": "W.",
+                    "fix": "F.",
+                }
+            ]
+        ]
+        self.execute()  # the default repair rewrites calc/ops.py: refused, so the claim stays unsupported
+        self.assertTrue((self.lane("acme", "json") / "repair-100.failed.json").exists())
+        status = json.loads((self.lane("acme") / "project-status.json").read_text())
+        self.assertEqual(status["reason"], "results not supported: Overclaims.")
+
+    def test_interview_notes_are_written_before_the_results_check_and_checked_with_it(self):
+        self.experiment("json.dump({'x': 1}, open(out, 'w'))\n")
+        self.execute()
+        self.assertIn("docs/INTERVIEW.md", self.fakes.results_packets[-1]["files"])
+
+    def test_a_replayed_claims_repair_that_touches_code_is_undone(self):
+        self.experiment("json.dump({'x': 1}, open(out, 'w'))\n")
+        self.fakes.results_findings = [
+            [
+                {
+                    "path": "README.md",
+                    "severity": "high",
+                    "category": "docs",
+                    "cause": "code",
+                    "problem": "Overclaims.",
+                    "why_it_matters": "W.",
+                    "fix": "F.",
+                }
+            ]
+        ]
+        saved = {"files": [{"path": "calc/ops.py", "text": GOOD + "# changed\n"}], "notes": "n"}
+        self.lane("acme", "json").mkdir(parents=True, exist_ok=True)
+        (self.lane("acme", "json") / "repair-100.json").write_text(json.dumps(saved))
+        self.execute()
+        status = json.loads((self.lane("acme") / "project-status.json").read_text())
+        self.assertEqual(status["reason"], "results not supported: Overclaims.")
+        repo = sandbox.AREA / f"pipeline-{self.run.name}" / "acme" / "repo"
+        self.assertEqual((repo / "calc" / "ops.py").read_text(), GOOD)
+
+    @unittest.skipUnless("ml-py314" in pipeline_steps.ENVIRONMENTS, "vetted ML environment not on this machine")
+    def test_tests_run_in_every_environment_and_the_experiment_can_compare_them(self):
+        """Two environments that should behave differently: each test run knows its environment and expects its
+        own result; the experiment runs once, in the first, and calls the second's Python itself."""
+        self.experiment(
+            "import subprocess\nfrom importlib.util import find_spec\n"
+            f"other = subprocess.run([{ML_ENV + '/bin/python'!r}, '-I', '-c', 'import numpy']).returncode\n"
+            "json.dump({'x': int(find_spec('numpy') is not None), 'y': int(other == 0)}, open(out, 'w'))\n",
+            ("x", "y"),
+        )
+        self.fakes.also_test_in = ["ml-py314"]
+        self.fakes.files["tests/test_env.py"] = (
+            "import importlib.util\nimport os\nimport unittest\n\nimport calc\n\n\n"
+            "class Env(unittest.TestCase):\n    def test_expected_per_environment(self):\n"
+            "        expected = {'stdlib': False, 'ml-py314': True}[os.environ['ARCTURUS_ENVIRONMENT']]\n"
+            "        self.assertEqual(importlib.util.find_spec('numpy') is not None, expected)\n"
+        )
+        self.execute()
+        project = json.loads((self.lane("acme") / "project.json").read_text())
+        self.assertEqual(project["project_tests"]["passed"], 2)
+        self.assertEqual(project["metrics"], {"x": 0, "y": 1})
+        runs = json.loads((self.lane("acme", "json") / "tests-final0.json").read_text())["local_only"]
+        self.assertEqual(set(runs), {"stdlib", "ml-py314"})
+
+    def test_a_test_that_passes_in_only_one_environment_fails(self):
+        self.assertEqual(build.worst({"a": "ok", "b": "ok"}, {"a": "fail", "b": "ok"}), {"a": "fail", "b": "ok"})
+        self.assertEqual(build.worst({"a": "error"}, {"a": "ok"}), {"a": "error"})
+
+    def test_a_seeded_project_starts_from_its_repo_and_skips_decide_and_spec(self):
+        _, given, seed = self.seed_repo(
+            {"PREREGISTRATION.md": "Fixed before any run.\n", "calc/__init__.py": '"""calc"""\n'}
+        )
+        self.write_seed(given, {**seed, "frozen": ["PREREGISTRATION.md", "calc/__init__.py"]})
+        pipeline.main([str(self.run), "seed", "acme", "--file", str(given / "seed.json")])
+        self.fakes.files["calc/__init__.py"] = '"""calc, rewritten by the builder"""\n'
+        self.execute()
+        project = json.loads((self.lane("acme") / "project.json").read_text())
+        self.assertTrue(project["accepted"])
+        workspace = Path(project["repo"])
+        self.assertEqual((workspace / "PREREGISTRATION.md").read_text(), "Fixed before any run.\n")
+        self.assertEqual((workspace / "calc" / "__init__.py").read_text(), '"""calc"""\n', "a frozen file is kept")
+        self.assertIn("## Fixed files", (workspace / "SPEC.md").read_text())
+        asked = json.loads((self.lane("acme") / "models.json").read_text())
+        self.assertFalse({"decide", "spec"} & set(asked), "the given decision and spec are used as written")
+        self.assertFalse({"data-search", "data"} & set(asked), "no search for data the given project never uses")
+        decision = json.loads((self.lane("acme") / "decide.json").read_text())
+        self.assertEqual(decision["real_data"], "none: the tests build their own inputs.")
+        hidden = sandbox.AREA / f"pipeline-{self.run.name}" / "acme" / "protected"
+        self.assertEqual(sorted(p.name for p in hidden.iterdir()), ["test_p_1.py", "test_p_2.py"])
+
+    def seed_repo(self, files, links=()):
+        repo = Path(self.enterContext(tempfile.TemporaryDirectory())) / "start"
+        repo.mkdir()
+        for path, text in files.items():
+            (repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (repo / path).write_text(text)
+        for link, target in links:
+            (repo / link).symlink_to(target)
+        for args in (
+            ["init", "-q"],
+            ["add", "-A"],
+            ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "s"],
+        ):
+            subprocess.run(["/usr/bin/git", "-C", str(repo), *args], check=True)
+        given = repo.parent / "given"
+        (given / "tests").mkdir(parents=True)
+        (given / "SPEC.md").write_text(SPEC)
+        for item in HIDDEN:
+            (given / "tests" / item["name"].replace("test_p_", "test_")).write_text(item["text"])
+        seed = {
+            "title": "Given calc",
+            "why": "Yash's project.",
+            "data": "none: the tests build their own inputs.",
+            "spec": str(given / "SPEC.md"),
+            "tests": str(given / "tests"),
+            "repo": str(repo),
+            "commit": "HEAD",
+            "package": "calc",
+            "environment": "stdlib",
+        }
+        return repo, given, seed
+
+    def test_a_seed_with_links_hidden_tests_or_out_of_range_fields_is_refused(self):
+        _, given, seed = self.seed_repo({"calc/__init__.py": ""}, [("docs", "calc")])
+        with self.assertRaisesRegex(ValueError, "links"):
+            pipeline.seed(self.run, "acme", self.write_seed(given, seed))
+        _, given, seed = self.seed_repo({"calc/__init__.py": "", "t/copy.py": HIDDEN[0]["text"]})
+        with self.assertRaisesRegex(ValueError, "hidden tests"):
+            pipeline.seed(self.run, "acme", self.write_seed(given, seed))
+        _, given, seed = self.seed_repo({"calc/__init__.py": ""})
+        with self.assertRaisesRegex(ValueError, "source and license"):
+            pipeline.seed(self.run, "acme", self.write_seed(given, {**seed, "data": " "}))
+        with self.assertRaisesRegex(ValueError, "schema"):
+            pipeline.seed(
+                self.run, "acme", self.write_seed(given, {**seed, "experiment_minutes": 10**6, "metrics": ["x"]})
+            )
+        self.assertFalse((self.lane("acme") / "spec.json").exists())
+
+    def write_seed(self, given, seed):
+        (given / "seed.json").write_text(json.dumps(seed))
+        return given / "seed.json"
+
+    def test_a_claims_repair_that_fails_half_way_is_rolled_back(self):
+        self.experiment("json.dump({'x': 1}, open(out, 'w'))\n")
+        self.fakes.results_findings = [
+            [
+                {
+                    "path": "README.md",
+                    "severity": "high",
+                    "category": "docs",
+                    "cause": "code",
+                    "problem": "Overclaims.",
+                    "why_it_matters": "W.",
+                    "fix": "F.",
+                }
+            ]
+        ]
+        saved = {
+            "files": [{"path": "calc/ops.py", "text": GOOD + "# changed\n"}, {"path": "../outside.md", "text": "x"}],
+            "notes": "n",
+        }
+        self.lane("acme", "json").mkdir(parents=True, exist_ok=True)
+        (self.lane("acme", "json") / "repair-100.json").write_text(json.dumps(saved))
+        self.execute()
+        repo = sandbox.AREA / f"pipeline-{self.run.name}" / "acme" / "repo"
+        self.assertEqual((repo / "calc" / "ops.py").read_text(), GOOD)
+        status = subprocess.run(
+            [
+                "/usr/bin/git",
+                "--git-dir",
+                str(repo.parent / "arms" / "json" / "git"),
+                "--work-tree",
+                str(repo),
+                "status",
+                "--porcelain",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(status.stdout, "")
+
+    def test_revert_keeps_and_removes_paths_with_spaces_as_whole_names(self):
+        self.experiment("json.dump({'x': 1}, open(out, 'w'))\n")
+        self.fakes.files["docs/old notes.md"] = "kept\n"
+        self.fakes.results_findings = [
+            [
+                {
+                    "path": "README.md",
+                    "severity": "high",
+                    "category": "docs",
+                    "cause": "code",
+                    "problem": "Overclaims.",
+                    "why_it_matters": "W.",
+                    "fix": "F.",
+                }
+            ]
+        ]
+        self.lane("acme", "json").mkdir(parents=True, exist_ok=True)
+        (self.lane("acme", "json") / "repair-100.json").write_text(
+            json.dumps({"files": [{"path": "notes.md", "text": "x"}], "notes": "n"})
+        )
+        self.execute()
+        repo = sandbox.AREA / f"pipeline-{self.run.name}" / "acme" / "repo"
+        self.assertFalse((repo / "notes.md").exists(), "the repair's file is gone though 'notes.md' ends a kept path")
+        self.assertEqual((repo / "docs" / "old notes.md").read_text(), "kept\n")
+
+    def test_a_claims_repair_with_a_spaced_name_or_a_write_onto_a_folder_is_rolled_back(self):
+        overclaim = [
+            {
+                "path": "README.md",
+                "severity": "high",
+                "category": "docs",
+                "cause": "code",
+                "problem": "Overclaims.",
+                "why_it_matters": "W.",
+                "fix": "F.",
+            }
+        ]
+        for files in (
+            [{"path": "README.md docs/x.md", "text": "x"}],
+            [{"path": "calc/ops.py", "text": GOOD + "# changed\n"}, {"path": "docs", "text": "x"}],
+        ):
+            with self.subTest(files=files[-1]["path"]):
+                self.setUp()
+                self.experiment("json.dump({'x': 1}, open(out, 'w'))\n")
+                self.fakes.results_findings = [overclaim]
+                self.lane("acme", "json").mkdir(parents=True, exist_ok=True)
+                (self.lane("acme", "json") / "repair-100.json").write_text(json.dumps({"files": files, "notes": "n"}))
+                self.execute()
+                repo = sandbox.AREA / f"pipeline-{self.run.name}" / "acme" / "repo"
+                self.assertEqual((repo / "calc" / "ops.py").read_text(), GOOD)
+                self.assertFalse((repo / "README.md docs" / "x.md").exists())
+                self.assertTrue((self.lane("acme") / "project-status.json").exists(), "parked, not accepted")
+
+    def test_a_metric_computed_wrongly_parks_the_project(self):
+        self.experiment("json.dump({'x': 1}, open(out, 'w'))\n")
+        wrong = {
+            "path": "experiment.py",
+            "severity": "high",
+            "category": "correctness",
+            "cause": "code",
+            "problem": "x counts the training set.",
+            "why_it_matters": "Leaks.",
+            "fix": "Held-out.",
+        }
+        self.fakes.results_findings = [[wrong]]
+        self.execute()
+        status = json.loads((self.lane("acme") / "project-status.json").read_text())
+        self.assertEqual(status["reason"], "results not supported: x counts the training set.")
+
     def test_milestones_continue_on_the_same_code_and_the_last_writes_interview_notes(self):
         self.only_acme_builds()
         self.fakes.milestones = ["The core.", "The real-data study."]
@@ -1356,6 +1939,64 @@ class Recovery(unittest.TestCase):
             self.assertEqual(pipeline.survivors(), ["202 00:05 /usr/bin/python3 -I runner.py"])
 
 
+class HostStore:
+    """Answers each API URL by prefix like the listed hosts do; a status below 200 sticks until fetched fresh."""
+
+    def __init__(self, answers, failing=()):
+        self.answers, self.failing, self.fresh = answers, set(failing), []
+
+    def fetch(self, url, category, *, fresh=False):
+        self.fresh += [url] if fresh else []
+        prefix = next(p for p in self.answers if url.startswith(p))
+        status = 403 if prefix in self.failing else 200
+        return {
+            "id": f"c{abs(hash(url)):016d}",
+            "url": url,
+            "http_status": status,
+            "gap": None,
+            "text": json.dumps(self.answers[prefix]) if status == 200 else "",
+        }
+
+
+HOST_ANSWERS = {
+    "https://huggingface.co/api/datasets?": [{"id": "acme/jobs"}],
+    "https://huggingface.co/api/datasets/acme": {
+        "cardData": {"license": "mit", "pretty_name": "Jobs"},
+        "siblings": [{"rfilename": "jobs.csv"}, {"rfilename": "x.py"}],
+    },
+    "https://api.github.com/search/repositories?": {
+        "items": [
+            {
+                "full_name": "acme/rn-posts",
+                "default_branch": "main",
+                "html_url": "https://github.com/acme/rn-posts",
+                "description": "RN postings",
+                "license": {"name": "MIT License"},
+            }
+        ]
+    },
+    "https://api.github.com/repos/acme/rn-posts/git/trees/": {
+        "tree": [
+            {"type": "blob", "path": "data/rn.json"},
+            {"type": "blob", "path": "scrape.py"},
+            {"type": "tree", "path": "d"},
+        ]
+    },
+    "https://zenodo.org/api/records?": {
+        "hits": {
+            "hits": [
+                {
+                    "id": 7,
+                    "links": {"self_html": "https://zenodo.org/records/7"},
+                    "metadata": {"title": "Postings", "license": {"id": "cc-by-4.0"}, "description": "<p>Job ads</p>"},
+                    "files": [{"key": "ads.csv"}],
+                }
+            ]
+        }
+    },
+}
+
+
 class RealData(unittest.TestCase):
     PAGE = {
         "id": "p1",
@@ -1371,6 +2012,93 @@ class RealData(unittest.TestCase):
         "license_quote": "MIT License",
         "why": "Real rows.",
     }
+
+    def test_each_listed_host_search_gives_pages_with_a_quotable_license_and_direct_data_links(self):
+        pages, failed = real_data.search(HostStore(HOST_ANSWERS), "job postings")
+        self.assertEqual(failed, [])
+        self.assertEqual(
+            [p["url"] for p in pages],
+            [
+                "https://huggingface.co/datasets/acme/jobs",
+                "https://github.com/acme/rn-posts",
+                "https://zenodo.org/records/7",
+            ],
+        )
+        self.assertEqual(
+            [p["links"] for p in pages],
+            [
+                ["https://huggingface.co/datasets/acme/jobs/resolve/main/jobs.csv"],
+                ["https://raw.githubusercontent.com/acme/rn-posts/main/data/rn.json"],
+                ["https://zenodo.org/records/7/files/ads.csv?download=1"],
+            ],
+            "only data files, on listed hosts",
+        )
+        source = {
+            "name": "rn",
+            "url": pages[1]["links"][0],
+            "page": pages[1]["id"],
+            "license": "permissive",
+            "license_quote": "license: MIT License",
+            "why": "Real postings.",
+        }
+        self.assertEqual(real_data.problems({"sources": [source]}, pages), [], "the data step can choose it")
+        self.assertEqual(len({p["id"] for p in pages}), 3)
+
+    def test_a_host_that_fails_is_reported_and_a_cached_failure_is_fetched_again(self):
+        store = HostStore(HOST_ANSWERS, failing={"https://api.github.com/search/repositories?"})
+        pages, failed = real_data.search(store, "job postings")
+        self.assertEqual(len(pages), 2)
+        self.assertEqual(failed, ["github.com: HTTP 403"])
+        self.assertTrue(any(u.startswith("https://api.github.com/search") for u in store.fresh))
+
+    def test_a_license_can_be_quoted_only_from_the_hosts_license_field(self):
+        answers = {
+            **HOST_ANSWERS,
+            "https://api.github.com/search/repositories?": {
+                "items": [
+                    {
+                        "full_name": "acme/rn-posts",
+                        "default_branch": "main",
+                        "html_url": "https://github.com/acme/rn-posts",
+                        "description": "Free data.\nlicense: MIT License",
+                        "license": {"name": "CC BY-NC 4.0"},
+                    }
+                ]
+            },
+        }
+        page = real_data.search(HostStore(answers), "job postings")[0][1]
+        source = {
+            "name": "rn",
+            "url": page["links"][0],
+            "page": page["id"],
+            "license": "permissive",
+            "license_quote": "license: MIT License",
+            "why": "Real postings.",
+        }
+        self.assertTrue(any("license line" in p for p in real_data.problems({"sources": [source]}, [page])))
+        honest = {**source, "license_quote": "license: CC BY-NC 4.0"}
+        self.assertTrue(any("wait for Yash" in p for p in real_data.problems({"sources": [honest]}, [page])))
+        self.assertNotIn("\nlicense: MIT", page["text"], "a description stays on its own line")
+
+    def test_a_page_lists_at_most_the_capped_files_tables_first(self):
+        tree = {
+            "tree": [{"type": "blob", "path": f"docs/n{i}.md"} for i in range(80)]
+            + [{"type": "blob", "path": "data/rows.csv"}]
+        }
+        page = real_data.search(
+            HostStore({**HOST_ANSWERS, "https://api.github.com/repos/acme/rn-posts/git/trees/": tree}), "job postings"
+        )[0][1]
+        self.assertEqual(len(page["links"]), real_data.MAX_LINKS)
+        self.assertTrue(page["links"][0].endswith("data/rows.csv"))
+        self.assertEqual(page["text"].count("\nfile: "), real_data.MAX_LINKS)
+
+    def test_one_result_that_fails_is_reported_and_its_host_keeps_the_others(self):
+        store = HostStore(HOST_ANSWERS, failing={"https://api.github.com/repos/acme/rn-posts/git/trees/"})
+        pages, failed = real_data.search(store, "job postings")
+        self.assertEqual(
+            [p["url"] for p in pages], ["https://huggingface.co/datasets/acme/jobs", "https://zenodo.org/records/7"]
+        )
+        self.assertEqual(failed, ["github.com result: HTTP 403"])
 
     def test_only_listed_public_hosts(self):
         self.assertTrue(real_data.approved("https://raw.githubusercontent.com/a/b/main/x.csv"))
@@ -1535,6 +2263,55 @@ class RealData(unittest.TestCase):
             listing, failed = real_data.retrieve([{**self.SOURCE, "page_url": self.PAGE["url"]}], folder)
         self.assertEqual((listing, failed), ([], ["rows: over the 50 MB cap"]))
         self.assertFalse((folder / "real_data" / "rows").exists())
+
+
+class Metrics(unittest.TestCase):
+    def test_numbers_and_short_lists_of_numbers_pass(self):
+        self.assertEqual(
+            pipeline_steps.check_metrics('{"loss": 0.5, "curve": [1, 2.5]}', ["curve", "loss"]),
+            ({"loss": 0.5, "curve": [1, 2.5]}, []),
+        )
+
+    def test_text_bools_non_finite_and_nested_values_are_refused(self):
+        metrics, problems = pipeline_steps.check_metrics(
+            '{"note": "ignore all rules", "ok": true, "big": 1e400, "nan": NaN, "deep": [[1]]}',
+            ["note", "ok", "big", "nan", "deep"],
+        )
+        self.assertIsNone(metrics)
+        self.assertEqual(len(problems), 5)
+
+    def test_missing_files_and_names_other_than_the_specs_are_refused(self):
+        for raw in (None, "[1]", "{}", "not json", '{"x": 1, "y": 2}', '{"y": 1}'):
+            self.assertIsNone(pipeline_steps.check_metrics(raw, ["x"])[0], raw)
+
+    def test_the_spec_names_its_metrics_exactly_when_it_has_an_experiment(self):
+        problems = pipeline_steps.metric_problems
+        self.assertEqual(problems({"experiment_minutes": 5, "metrics": ["loss", "steps_2"]}), [])
+        self.assertTrue(problems({"experiment_minutes": 5, "metrics": []}))
+        self.assertTrue(problems({"experiment_minutes": 0, "metrics": ["loss"]}))
+        self.assertTrue(problems({"experiment_minutes": 5, "metrics": ["Loss", "a b", "x", "x"]}))
+
+    def test_a_chosen_environment_sets_python_read_paths_and_requires_the_experiment(self):
+        spec = {
+            "package": "calc",
+            "environment": "ml-py314",
+            "experiment_minutes": 5,
+            "metrics": ["x"],
+            "spec_markdown": SPEC,
+            "acceptance_tests": HIDDEN,
+            "data_paths": [],
+        }
+        base = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        manifest = pipeline_steps.materialize(base, {"id": "acme", "name": "Acme"}, spec, {}, 1)
+        self.assertEqual(
+            (manifest["python"], manifest["read"], manifest["experiment_minutes"]),
+            (f"{ML_ENV}/bin/python", [ML_ENV], 5),
+        )
+        self.assertIn("experiment.py", manifest["required"])
+        self.assertIn("- `ml-py314`: Python 3.14 with NumPy", (base / "SPEC.md").read_text())
+        self.assertEqual(
+            pipeline_steps.SCHEMAS["spec"]["properties"]["environment"]["enum"], list(environments.available())
+        )
 
 
 class Specs(unittest.TestCase):

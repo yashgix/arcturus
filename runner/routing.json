@@ -49,6 +49,11 @@
       "claude-sonnet-5-5",
       "gpt-6-sol"
     ],
+    "capability": [
+      "deepseek-flash",
+      "claude-haiku-5-5",
+      "gpt-6-luna"
+    ],
     "data": [
       "deepseek-flash",
       "claude-haiku-5-5",

@@ -9,7 +9,9 @@ import json
 import os
 from pathlib import Path
 import pwd
+import stat
 import subprocess
+import time
 
 PRIVATE = (
     "/Users",
@@ -43,6 +45,8 @@ SERVICES_DENIED = (
     "com.apple.pasteboard.1",
 )
 AREA = Path("/Users/Shared/arcturus-exec")
+MAX_JOB_FILE = 64 * 1024 * 1024
+STOP_POLLS = 50
 LAUNCHER = "/usr/local/libexec/arcturus-exec/run-as-exec"
 START = ("/usr/bin/sudo", "-n", "/bin/launchctl", "asuser", "490", "/usr/bin/sudo", "-u", "_arcexec", LAUNCHER, "run")
 STOP = ("/usr/bin/sudo", "-n", "-u", "_arcexec", LAUNCHER, "stop")
@@ -92,7 +96,14 @@ def selectors(paths):
     return " ".join(f"(subpath {json.dumps(p)})" for p in unique)
 
 
-def profile(read, write, port=None, deny_read=(), deny_write=()):
+def ancestors(paths):
+    """The folders above each path, for metadata only: a venv's Python resolves its own path at start, and Node
+    checks its output files."""
+    folders = {str(f) for p in paths for q in (Path(p).absolute(), Path(p).resolve()) for f in q.parents}
+    return " ".join(f"(literal {json.dumps(f)})" for f in sorted(folders))
+
+
+def profile(read, write, port=None, deny_read=(), deny_write=(), outputs=()):
     network = f'(allow network-outbound (remote ip "localhost:{int(port)}"))' if port else ""
     literals = " ".join(f"(literal {json.dumps(p)})" for p in EXEC_DENIED)
     services = " ".join(f'(global-name "{s}")' for s in SERVICES_DENIED)
@@ -101,7 +112,9 @@ def profile(read, write, port=None, deny_read=(), deny_write=()):
     return (
         f"(version 1)(allow default)(deny network*){network}"
         f'(deny file-write*)(allow file-write* {selectors(write)} (literal "/dev/null") (literal "/dev/tty")){fixed}'
-        f"(deny file-read* {selectors(PRIVATE)})(allow file-read* {selectors([*read, *write])}){hidden}"
+        f"(deny file-read* {selectors(PRIVATE)})(allow file-read* {selectors([*read, *write])})"
+        f"(allow file-read-metadata {ancestors([*read, *write])}"
+        f"{''.join(f' (literal {json.dumps(str(Path(o).absolute()))})' for o in outputs)}){hidden}"
         f"(deny process-exec {literals})(deny mach-lookup {services})"
         "(deny signal)(allow signal (target pgrp))(allow signal (target children))"
     )
@@ -161,8 +174,11 @@ def job_processes():
 def stop():
     """Kill every _arcexec process; fail if any survives, so nothing of the job runs while rights are handed out."""
     subprocess.run(STOP, capture_output=True)
-    if job_processes():
-        raise RuntimeError("could not stop the execution account's processes")
+    for _ in range(STOP_POLLS):  # killed processes can take a moment to exit
+        if not job_processes():
+            return
+        time.sleep(0.1)
+    raise RuntimeError("could not stop the execution account's processes")
 
 
 def create(path):
@@ -185,7 +201,7 @@ def run(argv, read, write, env, cwd, timeout, stdout, stderr, port=None, deny_re
             *(f"{k}={v}" for k, v in env.items()),
             "/usr/bin/sandbox-exec",
             "-p",
-            profile(read, write, port, deny_read, deny_write),
+            profile(read, write, port, deny_read, deny_write, (stdout, stderr)),
             *argv,
         ]
         try:
@@ -215,36 +231,40 @@ def wait(process, timeout):
         return True
 
 
-def read_job_file(path):
-    """A file the job wrote, read without following links; None if it is missing, a link or not the job's own."""
+def read_job_file(path, limit=MAX_JOB_FILE):
+    """A file the job wrote, read without following links or blocking; None if it is missing, a link, not a regular
+    file, not the job's own, or larger than limit bytes."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return None
-    with os.fdopen(fd) as file:
+    with os.fdopen(fd, "rb") as file:
         info = os.fstat(fd)
-        if info.st_uid == os.getuid() or info.st_nlink != 1:
+        if not stat.S_ISREG(info.st_mode) or info.st_uid == os.getuid() or info.st_nlink != 1:
             return None
-        return file.read()
+        data = file.read(limit + 1)
+    return None if len(data) > limit else data.decode("utf-8", "replace")
 
 
-def run_tests(python, workspace, start, pattern, scratch, deny_read=(), timeout=300):
+def run_tests(python, workspace, start, pattern, scratch, deny_read=(), timeout=300, read=(), extra_env=None):
     """Each test's outcome ("ok", "fail" or "error") with a short message, run with no network and no writes outside
-    the scratch folder."""
+    the scratch folder. read and extra_env: the project environment's read-only paths and variables."""
     scratch = Path(scratch)
     scratch.mkdir(parents=True, exist_ok=True)
     out, errors = scratch / "outcome.json", scratch.with_name(f"{scratch.name}.stderr.txt")
     out.unlink(missing_ok=True)
     env = {
+        **(extra_env or {}),
         "PATH": "/usr/bin:/bin",
         "HOME": str(scratch),
         "TMPDIR": str(scratch),
         "PYTHONDONTWRITEBYTECODE": "1",
         "LANG": "en_US.UTF-8",
+        "MPLBACKEND": "Agg",
     }
     code, timed_out, _ = run(
         [python, "-I", "-B", "-c", RUNNER, str(start), pattern, str(out), str(workspace)],
-        [workspace, start],
+        [workspace, start, *read],
         [scratch],
         env,
         workspace,

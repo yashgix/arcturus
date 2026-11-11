@@ -363,7 +363,7 @@ class BuildLoop(unittest.TestCase):
         self.assertIn("add(40, 2)", evidence)  # control: it read the hidden test source
         self.assertIn("PermissionError", evidence)  # its network attempt was refused by the sandbox
         scratch = self.run_dir / "arms/json/scratch"
-        output = (scratch / "protected.stdout.txt").read_text() + (scratch / "protected.stderr.txt").read_text()
+        output = "".join((scratch / f"protected-default.{kind}.txt").read_text() for kind in ("stdout", "stderr"))
         self.assertIn(MARK, output)
         sent = [json.dumps(packet) for _, packet in self.upstream.packets]
         self.assertEqual(len(sent), 7)
@@ -441,7 +441,7 @@ class BuildLoop(unittest.TestCase):
         self.assertTrue(Path(path).read_text())  # control: readable outside the sandbox
         self.upstream.ops = f"KEY = open({path!r}).read()\ndef add(a, b):\n    return a + b\n"
         self.run_arms()
-        raw = json.loads((self.lane() / "tests-0.json").read_text())["local_only"]["protected"]
+        raw = json.loads((self.lane() / "tests-0.json").read_text())["local_only"]["default"]["protected"]
         self.assertEqual({kind for kind, _ in raw.values()}, {"error"})
         self.assertIn("PermissionError", json.dumps(raw))
 
@@ -573,7 +573,7 @@ class BuildLoop(unittest.TestCase):
         link = good.with_name("link.json")
         link.symlink_to(good)
         # Review 55, probe_exec 04: generated code writes a matching approval into its own scratch folder.
-        scratch = run.arm("json") / "scratch/own"
+        scratch = run.arm("json") / "scratch/own-default"
         forged = scratch / "builder-review.json"
         code, _, _ = sandbox.run(
             [sys.executable, "-B", "-c", f"open({str(forged)!r}, 'w').write({good.read_text()!r})"],
@@ -952,6 +952,26 @@ class Containment(unittest.TestCase):
         self.assertEqual(sandbox.read_job_file(self.writable / "own.json"), "{}")
         self.assertIsNone(sandbox.read_job_file(self.writable / "link.json"))
         self.assertIsNone(sandbox.read_job_file(owner_file))
+
+    def test_job_pipes_and_oversized_files_are_refused_without_blocking(self):
+        script = (
+            f"import os; os.mkfifo({str(self.writable / 'pipe.json')!r}); "
+            f"open({str(self.writable / 'big.json')!r}, 'w').write('x' * 2000)"
+        )
+        sandbox.run(
+            [sys.executable, "-I", "-c", script],
+            [self.readable],
+            [self.writable],
+            {},
+            self.writable,
+            30,
+            self.root / "o",
+            self.root / "e",
+        )
+        self.assertTrue((self.writable / "pipe.json").is_fifo())
+        self.assertIsNone(sandbox.read_job_file(self.writable / "pipe.json"))
+        self.assertIsNone(sandbox.read_job_file(self.writable / "big.json", limit=1000))
+        self.assertEqual(len(sandbox.read_job_file(self.writable / "big.json", limit=2000)), 2000)
 
     def test_agent_cannot_create_opencode_home_config(self):
         home = self.writable / "home"

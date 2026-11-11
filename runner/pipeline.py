@@ -14,6 +14,8 @@ Nothing is sent, applied for or published. routing.json in RUN is read before ev
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from fnmatch import fnmatch
+import hashlib
 import http.client
 import json
 import os
@@ -37,6 +39,7 @@ import llm
 import pipeline_steps as steps
 import research_sources
 import real_data
+from research_reports import shape
 import routing
 from routing import read, write_json
 import sandbox
@@ -52,6 +55,7 @@ OPERATIONS = [
     "projects",
     "challenge",
     "decide",
+    "capability",
     "data",
     "spec",
     "plan",
@@ -100,6 +104,7 @@ POLL_SECONDS = 5
 CHOICES = ("project", "fast", "skip")
 # sandbox.stop() checks right after killing, so a process still exiting can trip it; a short wait clears it.
 SANDBOX_RACE = "could not stop the execution account's processes"
+CLAIMS_REPAIR = 100  # the claims repair's step number, far above any final repair's
 SANDBOX_RETRIES = 3
 SANDBOX_WAIT = 30
 
@@ -464,15 +469,17 @@ class Pipeline:
         if decision is None:
             return self.queue.set(cid, "parked", "no model could decide")
         choice = self.override(cid) or decision["decision"]
+        lane = self.steps.lane(company, "pipeline")
+        held = self.hold(company, decision, lane, note) if choice == "project" else []
+        blocked = steps.first_blocked(held)
         if choice == "skip":
             return self.queue.set(cid, "skipped", "; ".join(decision["reasons"])[:500], choice)
         self.queue.set(cid, "decided", decision["reasons"][0], choice)
-        lane = self.steps.lane(company, "pipeline")
         note("application packet")
         packet = self.steps.packet(company)  # before any build: applying never waits for a project
         project = None
-        if choice == "project":
-            project = read(lane / "project.json") or self.project(company, decision, note)
+        if choice == "project" and blocked != 1:
+            project = read(lane / "project.json") or self.project(company, decision, note, blocked)
         note("outreach draft")
         pitch = project and {"title": project["title"], "independently_reviewed": project["accepted"]}
         draft = self.steps.outreach(company, pitch)
@@ -483,19 +490,50 @@ class Pipeline:
         self.queue.set(
             cid,
             "ready",
-            (" and ".join(drafts) or "no drafts") + " ready" + (f"; project parked: {parked}" if parked else ""),
+            (" and ".join(drafts) or "no drafts")
+            + " ready"
+            + (f"; project parked: {parked}" if parked else "")
+            + (
+                f"; project held at milestone {blocked}, needs: {'; '.join(r['requirement'] for r in held)}"
+                if held
+                else ""
+            ),
             choice,
         )
         note("ready")
 
-    def project(self, company, decision, note):
+    def hold(self, company, decision, lane, note):
+        """The runner capabilities the decided project lacks, saved for the report. Selection is settled by then:
+        the project stays exactly as decided and waits. A seeded spec has already passed the runner's checks."""
+        held = []
+        if not (lane / "seed.json").exists():
+            note("capability check")
+            held = steps.missing(self.steps.capability(company, decision))
+        if not held:
+            (lane / "held.json").unlink(missing_ok=True)
+            return []
+        write_json(lane / "held.json", held)
+        note(
+            f"project held from milestone {steps.first_blocked(held)}, the runner cannot yet: "
+            f"{'; '.join(r['requirement'] for r in held)[:300]}"
+        )
+        return held
+
+    def project(self, company, decision, note, blocked=None):
         """Spec, build and the quality gate, milestone by milestone, each continuing on the same code. A fault the
-        reviewer shows from the spec's own words (a contradicting hidden test or spec) gets an automatic revision."""
+        reviewer shows from the spec's own words (a contradicting hidden test or spec) gets an automatic revision.
+        It stops before milestone *blocked*, which the runner cannot build yet: partial, never an accepted project."""
         lane, cid = self.steps.lane(company, "pipeline"), company["id"]
         milestones = decision.get("milestones") or steps.WHOLE_IDEA
         limits = self.router.config()["recovery"]
         while True:
             progress = read(lane / "progress.json") or {"milestone": 1, "respecs": 0}
+            if blocked and progress["milestone"] >= blocked:
+                note(
+                    f"milestone {progress['milestone'] - 1} of {len(milestones)} accepted; held before milestone "
+                    f"{blocked}"
+                )
+                return None
             if progress.get("pending"):  # decided before any crash, made once: a restart never skips it
                 revise(self.root, cid, progress["pending"])
                 write_json(lane / "progress.json", progress := {**progress, "pending": None})
@@ -536,8 +574,15 @@ class Pipeline:
     def attempt(self, company, decision, note, last):
         """One spec, build and quality gate: ("accepted", summary), ("respec", evidence) or ("parked", reason)."""
         base = sandbox.AREA / f"pipeline-{self.root.name}" / company["id"]
-        note("real data")
-        listing = self.steps.find_data(company, decision, base)
+        given = read(self.steps.lane(company, "pipeline") / "seed.json")
+        if given:  # its spec, tests and stated data are the project's; a search would only find unused data
+            listing = []
+        else:
+            note("real data")
+            try:
+                listing = self.steps.find_data(company, decision, base)
+            except real_data.SearchFailed as exc:  # nothing saved: the next run searches again
+                return "parked", f"real-data search failed, no host answered: {exc}"
         spec = self.steps.spec(company, decision, listing)
         if spec is None:
             return "parked", "no model could write the spec"
@@ -548,6 +593,9 @@ class Pipeline:
         manifest = steps.materialize(base, company, spec, self.manifest["keys"], config["repairs"], keep_code, evidence)
         if not build.test_ids(manifest["protected"]["dir"], manifest["protected"]["pattern"]):
             return "parked", "the spec's acceptance tests define no test"
+        if given:
+            manifest["frozen"] = given["frozen"]
+            steps.seed_workspace(steps.ProjectBuild(self.root, {**manifest, "builder": None, "reviewer": None}), given)
         if listing or (base / "repo" / real_data.FOLDER).exists():  # after git exists, so it is ignored from the start
             steps.ProjectBuild(self.root, {**manifest, "builder": None, "reviewer": None}).prepare("json")
             real_data.place(base, base / "arms" / "json")
@@ -569,8 +617,18 @@ class Pipeline:
             if not result.get("reviewed_commit"):
                 reasons = [f["problem"][:120] for f in steps.blocking(result["review"])][:2] or ["required tests fail"]
                 return "parked", "final review: " + "; ".join(reasons)
-            if last:
-                self.write_notes(pb, company, decision, result, note)
+            notes = (
+                (lambda metrics: self.write_notes(pb, company, decision, {**result, "metrics": metrics}, note))
+                if last
+                else (lambda metrics: None)
+            )
+            metrics = None
+            if manifest["experiment_minutes"]:  # the notes are written first, so the results check covers them
+                metrics, problem = self.results(pb, note, notes)
+                if problem:
+                    return "parked", problem[:300]
+            else:
+                notes(None)
             summary = {
                 "title": decision["idea_title"],
                 "repo": str(pb.workspace("json")),
@@ -583,8 +641,63 @@ class Pipeline:
                 "open_findings": len(steps.documented(result["review"])),
                 "real_data": len(listing),
                 "demo": steps.run_demo(pb),
+                "metrics": metrics,
             }
         return "accepted", summary
+
+    def results(self, pb, note, notes):
+        """(metrics, None) once the experiment gives identical metrics twice and an independent check finds every
+        claim made from them supported, interview notes included; else (None, why). Claims that go too far get one
+        wording repair (README and docs only)."""
+        env, runs = steps.experiment_environment(pb), []
+        for n in (1, 2):
+            note(f"experiment run {n} of 2")
+            value, problems = steps.run_experiment(pb, env)
+            if problems:
+                return None, "experiment: " + "; ".join(problems)
+            runs.append(value)
+        if runs[0] != runs[1]:
+            return None, "experiment not reproducible: " + ", ".join(k for k in runs[0] if runs[0][k] != runs[1][k])
+        metrics = runs[0]
+        pb.write_files(
+            "json",
+            {"files": [{"path": "results/metrics.json", "text": json.dumps(metrics, indent=1) + "\n"}]},
+            "Experiment metrics, measured by the runner",
+        )
+        notes(metrics)
+        for n in range(2):
+            result = steps.results_review(pb, self.router, metrics, n)
+            if result is None:
+                return None, "no results review came back"
+            if not steps.blocking(result["review"]):
+                return metrics, None
+            if n or not steps.docs_only(result["review"]) or not self.repair_claims(pb, result):
+                break
+        reasons = [f["problem"][:150] for f in steps.blocking(result["review"])][:2]
+        return None, "results not supported: " + "; ".join(reasons)
+
+    def repair_claims(self, pb, result):
+        """One repair of README and docs only. The limit is checked on what changed, so a replayed answer is held to
+        it too; anything else is undone."""
+        before = result["commit"]
+        fixer = steps.ProjectBuild(self.root, {**pb.manifest, "allowed": list(steps.RESULT_DOCS)}, self.connection)
+        try:
+            try:
+                made = self.repair(fixer, CLAIMS_REPAIR - pb.manifest["repairs"] - 1, result) is not None
+            except OSError:  # e.g. a saved answer that writes onto a folder: a failed repair, rolled back below
+                made = False
+            outside = [
+                p
+                for p in steps.changed_files(pb, before) + steps.uncommitted(pb)
+                if not any(fnmatch(p, g) for g in steps.RESULT_DOCS)
+            ]
+        except BaseException:
+            undo_claims(pb, before, "it stopped")
+            raise
+        if outside or not made:  # also a half-written answer that failed on a later file
+            undo_claims(pb, before, f"it changed {', '.join(outside[:3])}" if outside else "it did not finish")
+            return False
+        return True
 
     def write_notes(self, pb, company, decision, result, note):
         note("interview notes")
@@ -809,6 +922,9 @@ def project_state(lane, row):
     """Where the company's project stands: ready, in progress, recovering, waiting for approval or dropped."""
     if (lane / "project.json").exists():
         return "ready"
+    if gaps(lane):
+        done = len(list(lane.glob("milestone-*.json")))
+        return f"partial: {done} milestones accepted, held" if done else "held: runner capability missing"
     if row["decision"] in ("fast", "skip") or (lane / "project-status.json").exists():
         return "dropped"
     if (read(lane / "real-data.json") or {}).get("needs_approval"):
@@ -816,6 +932,38 @@ def project_state(lane, row):
     if row["decision"] == "project" and ((lane / "revisions.jsonl").exists() or "repair" in row["note"]):
         return "recovering"
     return "in progress"
+
+
+def gaps(lane):
+    """What the runner lacked for this lane's decided project at its last capability check."""
+    return read(lane / "held.json") or []
+
+
+def gap_lines(pipeline):
+    """Each held project as decided, and what would let Arcturus build it: for Yash to approve or not."""
+    lines = []
+    for row in pipeline.queue.rows():
+        company = pipeline.company(row["id"])
+        lane = company and pipeline.steps.lane(company, "pipeline")
+        if not lane or not (missing := gaps(lane)):
+            continue
+        decision = read(lane / "decide.json")
+        lines.append(
+            f"- **{company['name']}**: {decision['idea_title']} (stack: "
+            f"{', '.join(decision.get('stack') or ['not stated'])})"
+        )
+        lines += [
+            f"  - Milestone {k} accepted (part of the project, not the finished project): `{read(path)['repo']}`"
+            for k, path in enumerate(sorted(lane.glob("milestone-*.json")), 1)
+        ]
+        lines += [
+            f"  - Missing {r['requirement']} (milestones {', '.join(map(str, r.get('milestones') or [1]))}). "
+            f"Smallest safe extension: {r['extension'].rstrip('.')}. Needs approval: {r['approvals']}"
+            for r in missing
+        ]
+    if lines:
+        lines.append("- Once the runner has what is missing: `pipeline.py RUN retry COMPANY` (the check runs again).")
+    return lines or ["- None."]
 
 
 def company_line(pipeline, row, rows):
@@ -846,10 +994,10 @@ def measure_lines(pipeline, rows):
     attempted, accepted, lines = 0, [], []
     for row in pipeline.queue.rows():
         company = pipeline.company(row["id"])
-        if not company or row["decision"] != "project":
+        lane = company and pipeline.steps.lane(company, "pipeline")
+        if not company or row["decision"] != "project" or gaps(lane):
             continue
         attempted += 1
-        lane = pipeline.steps.lane(company, "pipeline")
         if not (lane / "project.json").exists():
             continue
         decision, mine = read(lane / "decide.json"), [r for r in rows if r["lane"].split("/")[0] == row["id"]]
@@ -978,6 +1126,7 @@ def write_report(pipeline):
         "",
     ] + spend_lines(rows)
     lines += ["", "## Good startups whose project is in trouble", ""] + trouble_lines(pipeline)
+    lines += ["", "## Projects held for a runner capability (kept as decided)", ""] + gap_lines(pipeline)
     lines += ["", "## Measures", ""] + measure_lines(pipeline, rows)
     lines += ["", "## Ready for Yash (drafts only; nothing was sent)", ""] + ready_lines(pipeline)
     lines += ["", f"DeepSeek balance: {balances(pipeline.root)}", f"Last start: {last_start(pipeline.root)}"]
@@ -1050,6 +1199,99 @@ def revise(root, company_id, reason, rebuild=False):
     (specs / "project-status.json").unlink(missing_ok=True)
     log_revision(specs, reason)
     Queue(root).set(company_id, "decided", f"revising: {reason[:200]}")
+
+
+def undo_claims(pb, before, why):
+    steps.discard_uncommitted(pb)
+    steps.revert(pb, before, f"Undo the claims repair: {why}")
+
+
+def seed(root, company_id, path):
+    """A project Yash chose and specified by hand (path: JSON with title, why, data, spec, tests, repo, commit,
+    package, environment, also_test_in, experiment_minutes, metrics). Its spec and hidden tests pass the same checks
+    as a model's; the decide and spec steps then use them as written, and the build starts from the repo's commit.
+    'data' states the data it uses, with source and license (or "none"), since no data search runs for it."""
+    given = json.loads(Path(path).read_text())
+    if not isinstance(given.get("data"), str) or not given["data"].strip():
+        raise ValueError("state the data the project uses, with its source and license, or 'none' (field 'data')")
+    tests = [
+        {"name": "test_p_" + f.name.removeprefix("test_").removeprefix("p_"), "text": f.read_text()}
+        for f in sorted(Path(given["tests"]).glob("test_*.py"))
+    ]
+    spec = {
+        "package": given["package"],
+        "environment": given["environment"],
+        "also_test_in": given.get("also_test_in", []),
+        "experiment_minutes": given.get("experiment_minutes", 0),
+        "metrics": given.get("metrics", []),
+        "spec_markdown": Path(given["spec"]).read_text() + fixed_section(given),
+        "acceptance_tests": tests,
+        "data_paths": given.get("data_paths", []),
+    }
+    if not shape(spec, steps.SCHEMAS["spec"]):
+        raise ValueError("the given spec does not match the spec schema (fields, environments, limits)")
+    if problems := steps.check_spec(spec):
+        raise ValueError("the given spec does not pass the spec checks: " + "; ".join(problems))
+    commit = git_show(given["repo"], given["commit"] + "^{commit}", None).strip()
+    if leaked := hidden_in_repo(given, commit, tests):
+        raise ValueError(f"the repository holds hidden tests, which builders would then see: {leaked[:3]}")
+    lane = root / "lanes" / company_id / "pipeline"
+    lane.mkdir(parents=True, exist_ok=True)
+    answers = dict.fromkeys((*steps.FOUR, "portfolio_difference"), "Chosen by Yash; see the specification.")
+    write_json(
+        lane / "decide.json",
+        {
+            "decision": "project",
+            "impact": 5,
+            "company_priority": 5,
+            "reasons": [given["why"]],
+            "idea_title": given["title"],
+            "scope": given["title"],
+            "demo": "none",
+            "alternatives": [],
+            "real_data": given["data"],
+            "milestones": [given["title"]],
+            "stack": [f"Python, environment {given['environment']}"],
+            **answers,
+        },
+    )
+    write_json(lane / "spec.json", spec)
+    frozen = {path: git_show(given["repo"], commit, path) for path in given.get("frozen", [])}
+    write_json(lane / "seed.json", {"repo": str(Path(given["repo"]).resolve()), "commit": commit, "frozen": frozen})
+    write_json(root / "overrides.json", {**(read(root / "overrides.json") or {}), company_id: "project"})
+    Queue(root).set(company_id, "researched", "project given by hand")
+
+
+def hidden_in_repo(given, commit, tests):
+    """Files of the seed commit that are a hidden test (same content), or the tests folder inside the repo; a seed
+    with links is refused outright."""
+    repo, folder = Path(given["repo"]).resolve(), Path(given["tests"]).resolve()
+    if folder.is_relative_to(repo):
+        return [str(folder)]
+    blobs = {
+        hashlib.sha1(b"blob %d\0" % len(t["text"].encode()) + t["text"].encode()).hexdigest(): t["name"] for t in tests
+    }
+    rows = subprocess.run(
+        ["/usr/bin/git", "-C", str(repo), "ls-tree", "-r", commit], capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    if links := [r.split("\t", 1)[1] for r in rows if r.startswith("120000")]:
+        raise ValueError(f"the seed holds links, which could redirect writes: {links[:3]}")
+    return [blobs[r.split()[2]] for r in rows if r.split()[2] in blobs]
+
+
+def fixed_section(given):
+    if not given.get("frozen"):
+        return ""
+    return (
+        "\n\n## Fixed files (kept by the runner)\n\nThese files are part of the given project and are restored "
+        "before every commit, so never write them: " + ", ".join(f"`{p}`" for p in given["frozen"]) + ".\n"
+    )
+
+
+def git_show(repo, commit, path):
+    """A file's text at a commit, or with no path the commit's full id."""
+    args = ["show", f"{commit}:{path}"] if path else ["rev-parse", "--verify", commit]
+    return subprocess.run(["/usr/bin/git", "-C", str(repo), *args], capture_output=True, text=True, check=True).stdout
 
 
 def log_revision(lane, reason):
@@ -1160,6 +1402,7 @@ def main(argv=None):
             "retry",
             "schedule",
             "unschedule",
+            "seed",
         ),
     )
     parser.add_argument(
@@ -1170,6 +1413,7 @@ def main(argv=None):
     parser.add_argument("--standing", type=int, help="grant: a standing allowance for this many companies")
     parser.add_argument("--reason", default="")
     parser.add_argument("--rebuild", action="store_true", help="revise: set the code aside and build fresh")
+    parser.add_argument("--file", type=Path, help="seed: the hand-written project's JSON")
     parser.add_argument("args", nargs="*")
     parser.add_argument("--count", type=int, default=3)
     parser.add_argument("--registry", default=str(Path.home() / "arcturus-runs/radar/registry.sqlite"))
@@ -1199,6 +1443,8 @@ def main(argv=None):
                 raise ValueError("say why with --reason; the spec model reads it")
             for company in args.args:
                 revise(root, company, args.reason, args.rebuild)
+        elif args.command == "seed":
+            seed(root, args.args[0], args.file)
         elif args.command == "override":
             company, choice = args.args
             if choice not in CHOICES:

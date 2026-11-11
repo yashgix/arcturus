@@ -3,14 +3,17 @@ account or key, size caps, the license quoted from a captured page and a checksu
 workspace, readable but not writable by the job, linked in as real_data/ and kept out of git and every model packet."""
 
 import hashlib
+import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
 import tarfile
 import urllib.request
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 import zipfile
+
+from workers import WorkerFailure
 
 # Public hosting that serves files without an account. Anything else waits for Yash.
 HOSTS = ("github.com", "githubusercontent.com", "huggingface.co", "hf.co", "zenodo.org")
@@ -58,6 +61,16 @@ PREVIEW = 1_500
 NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,40}")
 FOLDER = "real_data"
 TEXT = (".csv", ".tsv", ".json", ".jsonl", ".txt", ".md", ".py", ".yaml", ".yml", ".xml", ".html")
+RESULTS = 2  # per host and query: each result costs one more API request
+TABLES = (".csv", ".tsv", ".json", ".jsonl")
+MAX_LINKS = 60
+
+
+BAD_ANSWER = (AttributeError, IndexError, KeyError, TypeError, ValueError)
+
+
+class SearchFailed(Exception):
+    """No listed host could be searched: the project waits instead of going on as if nothing existed."""
 
 
 def approved(url):
@@ -92,14 +105,22 @@ def problems(value, pages):
             found.append(f"{source['name']}: page must be the id of a captured page")
         elif source["url"] != page["url"] and source["url"] not in page["links"]:
             found.append(f"{source['name']}: the url must be the page itself or a link on it")
-        elif len(source["license_quote"]) < 8 or source["license_quote"] not in page["text"]:
-            found.append(f"{source['name']}: license_quote must be copied exactly from the page's text")
-        if not usable(source):
+        elif len(source["license_quote"]) < 8 or source["license_quote"] not in quotable(page):
+            found.append(
+                f"{source['name']}: license_quote must be copied exactly from the page's "
+                + ("license line" if "license" in page else "text")
+            )
+        if not usable(source) or page and LIMITING.search(page.get("license") or ""):
             found.append(
                 f"{source['name']}: a {source['license']} license, or terms that limit the use, wait for "
                 "Yash; list it in needs_approval"
             )
     return found
+
+
+def quotable(page):
+    """Where a license may be quoted from: a search result's own license field, never its description or names."""
+    return f"license: {page['license']}" if "license" in page else page["text"]
 
 
 def usable(source):
@@ -110,6 +131,143 @@ def usable(source):
 def runs_data(text):
     """Test code that names real_data/ and could run what it reads."""
     return FOLDER in text and bool(RUNS.search(text))
+
+
+def search(store, query):
+    """Candidate data pages for one query from the listed hosts' own keyless search APIs (a general web search
+    refuses automated queries). Each page is built from the host's metadata: title, license, description and the
+    data files as direct links. Returns the pages and the host searches that failed."""
+    pages, failed = [], []
+    for host, finder in (("huggingface.co", huggingface), ("github.com", github), ("zenodo.org", zenodo)):
+        try:
+            for item in finder(store, query):
+                try:
+                    pages.append(item())
+                except BAD_ANSWER as exc:  # one result's details; the host's others stay
+                    failed.append(f"{host} result: {str(exc)[:120]}")
+        except BAD_ANSWER as exc:
+            failed.append(f"{host}: {str(exc)[:120]}")
+    return pages, failed
+
+
+def api(store, url):
+    """One captured API answer as JSON; a cached failure (e.g. a rate limit) is fetched once more."""
+    try:
+        page = store.fetch(url, "data")
+        if page.get("http_status") != 200:
+            page = store.fetch(url, "data", fresh=True)
+    except WorkerFailure as exc:  # the store's fetch budget for this company is used up
+        raise ValueError(str(exc)) from None
+    if page.get("http_status") != 200:
+        raise ValueError(f"HTTP {page.get('http_status')} {page.get('gap') or ''}".strip())
+    try:
+        return page, json.loads(page["text"])
+    except ValueError:
+        raise ValueError(f"answer too large to capture whole ({len(page['text'])} characters)") from None
+
+
+def candidate(capture, n, url, title, license, about, files):
+    """A page the data step can choose from: only its license field can be quoted as the license, its links are the
+    data files themselves (tables first, at most MAX_LINKS), and text from the host's users stays on one line."""
+    license = flat(license or "not stated")
+    files = sorted(
+        ((name, link) for name, link in files if approved(link)),
+        key=lambda f: PurePosixPath(f[0]).suffix.lower() not in TABLES,
+    )[:MAX_LINKS]
+    text = "\n".join(
+        [
+            f"title: {flat(title)}",
+            f"license: {license}",
+            f"about: {flat(about)[:2000]}",
+            *(f"file: {flat(name)}" for name, _ in files),
+        ]
+    )
+    return {
+        "id": f"{capture['id'][:16]}-{n}",
+        "url": url,
+        "text": text,
+        "license": license,
+        "links": [link for _, link in files],
+    }
+
+
+def flat(text):
+    return " ".join(str(text).split())
+
+
+def is_data(name):
+    return PurePosixPath(name).suffix.lower() in DATA_TYPES and PurePosixPath(name).name.lower() != "readme.md"
+
+
+def huggingface(store, query):
+    _, found = api(store, "https://huggingface.co/api/datasets?" + urlencode({"search": query, "limit": RESULTS}))
+    return [lambda n=n, item=item: huggingface_page(store, n, item["id"]) for n, item in enumerate(found[:RESULTS])]
+
+
+def huggingface_page(store, n, name):
+    capture, info = api(store, f"https://huggingface.co/api/datasets/{quote(name)}")
+    card = info.get("cardData") or {}
+    files = [
+        (f["rfilename"], f"https://huggingface.co/datasets/{quote(name)}/resolve/main/{quote(f['rfilename'])}")
+        for f in info.get("siblings", [])
+        if is_data(f["rfilename"])
+    ]
+    return candidate(
+        capture,
+        n,
+        f"https://huggingface.co/datasets/{name}",
+        name,
+        card.get("license"),
+        str(card.get("pretty_name") or info.get("description") or ""),
+        files,
+    )
+
+
+def github(store, query):
+    _, found = api(store, "https://api.github.com/search/repositories?" + urlencode({"q": query, "per_page": RESULTS}))
+    return [lambda n=n, repo=repo: github_page(store, n, repo) for n, repo in enumerate(found["items"][:RESULTS])]
+
+
+def github_page(store, n, repo):
+    name, branch = repo["full_name"], repo["default_branch"]
+    capture, tree = api(store, f"https://api.github.com/repos/{name}/git/trees/{quote(branch, safe='')}?recursive=1")
+    files = [
+        (t["path"], f"https://raw.githubusercontent.com/{name}/{quote(branch)}/{quote(t['path'])}")
+        for t in tree["tree"]
+        if t["type"] == "blob" and is_data(t["path"])
+    ]
+    return candidate(
+        capture,
+        n,
+        repo["html_url"],
+        name,
+        (repo.get("license") or {}).get("name"),
+        repo.get("description") or "",
+        files,
+    )
+
+
+def zenodo(store, query):
+    capture, found = api(store, "https://zenodo.org/api/records?" + urlencode({"q": query, "size": RESULTS}))
+    return [lambda n=n, hit=hit: zenodo_page(capture, n, hit) for n, hit in enumerate(found["hits"]["hits"][:RESULTS])]
+
+
+def zenodo_page(capture, n, hit):
+    meta = hit["metadata"]
+    files = [
+        (f["key"], f"https://zenodo.org/records/{hit['id']}/files/{quote(f['key'])}?download=1")
+        for f in hit.get("files", [])
+        if is_data(f["key"])
+    ]
+    return candidate(
+        capture,
+        n,
+        hit["links"]["self_html"],
+        meta["title"],
+        (meta.get("license") or {}).get("id"),
+        re.sub(r"<[^>]+>", " ", meta.get("description", "")),
+        files,
+    )
 
 
 class OnListedHosts(urllib.request.HTTPRedirectHandler):

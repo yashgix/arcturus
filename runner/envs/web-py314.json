@@ -1,0 +1,1 @@
+{"about": "Python 3.14 with Pydantic 2.14.3, FastAPI 0.162.2, httpx 0.28.1 and PyYAML 6.0.3 (yaml.safe_load only); tests drive the app in memory with fastapi.testclient.TestClient (no sockets)"}
